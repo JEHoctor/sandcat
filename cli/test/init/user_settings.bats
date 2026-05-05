@@ -78,6 +78,29 @@ teardown() {
 	assert_output "github.com"
 }
 
+@test "create_user_settings includes CURSOR_API_KEY secret" {
+	stub git \
+		"config --global user.name : echo ''" \
+		"config --global user.email : echo ''"
+
+	create_user_settings cursor
+
+	local settings="$HOME/.config/sandcat/settings.json"
+	run yq -r '.secrets.CURSOR_API_KEY.hosts[0]' "$settings"
+	assert_output "api.cursor.sh"
+}
+
+@test "create_user_settings for cursor does not include ANTHROPIC_API_KEY" {
+	stub git \
+		"config --global user.name : echo ''" \
+		"config --global user.email : echo ''"
+
+	create_user_settings cursor
+
+	local settings="$HOME/.config/sandcat/settings.json"
+	yq -e '.secrets | has("ANTHROPIC_API_KEY") | not' "$settings"
+}
+
 @test "create_user_settings includes network rules" {
 	stub git \
 		"config --global user.name : echo ''" \
@@ -91,6 +114,18 @@ teardown() {
 	yq -e '.network[] | select(.host == "*.claude.com")' "$settings"
 }
 
+@test "create_user_settings for cursor includes cursor network rules" {
+	stub git \
+		"config --global user.name : echo ''" \
+		"config --global user.email : echo ''"
+
+	create_user_settings cursor
+
+	local settings="$HOME/.config/sandcat/settings.json"
+	yq -e '.network[] | select(.host == "*.cursor.sh")' "$settings"
+	yq -e '.network[] | select(.host == "*.cursor.com")' "$settings"
+}
+
 @test "create_user_settings skips when file already exists" {
 	mkdir -p "$HOME/.config/sandcat"
 	echo '{"existing": true}' > "$HOME/.config/sandcat/settings.json"
@@ -99,4 +134,31 @@ teardown() {
 
 	run yq '.existing' "$HOME/.config/sandcat/settings.json"
 	assert_output "true"
+}
+
+@test "ensure_cursor_user_settings_defaults backfills missing cursor hosts" {
+	mkdir -p "$HOME/.config/sandcat"
+	cat > "$HOME/.config/sandcat/settings.json" <<'EOF'
+{
+  "env": {
+    "GIT_USER_NAME": "Test"
+  },
+  "secrets": {
+    "CURSOR_API_KEY": {
+      "value": "existing-key",
+      "hosts": ["api.cursor.sh"]
+    }
+  }
+}
+EOF
+
+	ensure_cursor_user_settings_defaults
+
+	local settings="$HOME/.config/sandcat/settings.json"
+	run yq -r '.secrets.CURSOR_API_KEY.value' "$settings"
+	assert_output "existing-key"
+	yq -e '.secrets.CURSOR_API_KEY.hosts[] | select(. == "api.cursor.sh")' "$settings"
+	yq -e '.secrets.CURSOR_API_KEY.hosts[] | select(. == "api2.cursor.sh")' "$settings"
+	yq -e '.secrets.CURSOR_API_KEY.hosts[] | select(. == "*.cursor.sh")' "$settings"
+	yq -e '.secrets.CURSOR_API_KEY.hosts[] | select(. == "*.cursor.com")' "$settings"
 }

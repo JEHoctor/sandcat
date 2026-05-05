@@ -25,7 +25,34 @@ update-ca-certificates
 # Point it at the mitmproxy CA so TLS verification works for Node-based
 # tools (e.g. Anthropic SDK).
 export NODE_EXTRA_CA_CERTS="$CA_CERT"
-echo "export NODE_EXTRA_CA_CERTS=\"$CA_CERT\"" > /etc/profile.d/sandcat-node-ca.sh
+
+# Force Node.js to use the system CA store (via OpenSSL) instead of its
+# bundled Mozilla roots. Required for tools that bundle their own Node.js
+# binary where NODE_EXTRA_CA_CERTS alone may not suffice.
+SANDCAT_NODE_OPTS="--use-openssl-ca"
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }$SANDCAT_NODE_OPTS"
+
+cat > /etc/profile.d/sandcat-node-ca.sh << NODEEOF
+export NODE_EXTRA_CA_CERTS="/mitmproxy-config/mitmproxy-ca-cert.pem"
+export NODE_OPTIONS="\${NODE_OPTIONS:+\$NODE_OPTIONS }$SANDCAT_NODE_OPTS"
+NODEEOF
+
+# Some CLIs don't consistently use the system trust store in all code paths.
+# Export common CA-related env vars so TLS clients prefer the updated Debian
+# CA bundle (which now includes the mitmproxy CA).
+CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+export SSL_CERT_FILE="$CA_BUNDLE"
+export SSL_CERT_DIR="/etc/ssl/certs"
+export CURL_CA_BUNDLE="$CA_BUNDLE"
+export REQUESTS_CA_BUNDLE="$CA_BUNDLE"
+export GIT_SSL_CAINFO="$CA_BUNDLE"
+cat > /etc/profile.d/sandcat-ca.sh << CAEOF
+export SSL_CERT_FILE="$CA_BUNDLE"
+export SSL_CERT_DIR="/etc/ssl/certs"
+export CURL_CA_BUNDLE="$CA_BUNDLE"
+export REQUESTS_CA_BUNDLE="$CA_BUNDLE"
+export GIT_SSL_CAINFO="$CA_BUNDLE"
+CAEOF
 
 # GPG keys are not forwarded into the container (credential isolation),
 # so commit signing would always fail.  Git env vars have the highest
@@ -53,8 +80,10 @@ else
     echo "No $SANDCAT_ENV found — env vars and secret substitution disabled"
 fi
 
-# Run vscode-user tasks: git identity, Java trust store, Claude Code update.
-su - vscode -c /usr/local/bin/app-user-init.sh
+# Run vscode-user tasks in a login shell so user profile customizations
+# (PATH/NVM/direnv, etc.) are applied. Re-source sandcat.env inside that
+# shell so app-user-init still receives sandcat placeholders and env vars.
+su - vscode -c '. /mitmproxy-config/sandcat.env 2>/dev/null || true; /usr/local/bin/app-user-init.sh'
 
 # Source all sandcat profile.d scripts from /etc/bash.bashrc so env vars
 # are available in non-login shells (e.g. VS Code integrated terminals).

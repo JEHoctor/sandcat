@@ -110,9 +110,9 @@ Selecting `scala` automatically includes `java` as a dependency. Stacks also
 install the corresponding VS Code extension (e.g. `rust-analyzer` for Rust,
 `metals` for Scala).
 
-Optional volume mounts (Claude config, .git, .idea) are configurable in the
-generated compose file. Claude config mounts are active by default for the
-Claude agent; .git and .idea are commented out. Set `SANDCAT_*` environment
+Optional volume mounts (agent config, .git, .idea) are configurable in the
+generated compose file. Agent config mounts are active by default for the
+selected agent; .git and .idea are commented out. Set `SANDCAT_*` environment
 variables for scripted usage. See the [CLI README](cli/README.md) for the full
 list of flags and environment variables.
 
@@ -151,8 +151,9 @@ multiple sandboxes are running in parallel.
 
 **`compose-all.yml`** — `network_mode: "service:wg-client"` routes all traffic
 through the WireGuard tunnel. The `mitmproxy-config` volume gives your container
-access to the CA cert, env vars, and secret placeholders. The `~/.claude/*`
-bind-mounts forward host Claude Code customizations — remove any mount whose
+access to the CA cert, env vars, and secret placeholders. The agent-specific
+config bind-mounts (for example `~/.claude/*` or `~/.cursor/*`) forward host
+customizations — remove any mount whose
 source does not exist on your host.
 
 **`Dockerfile.app`** — uses [mise](https://mise.jdx.dev/) to manage language
@@ -423,8 +424,10 @@ restart-proxy` after changing 1Password items.
 ### How it works internally
 
 1. The mitmproxy container mounts `~/.config/sandcat/settings.json` (read-only)
-   and the project's `.sandcat/` directory (read-only) alongside the
-   `mitmproxy_addon.py` addon script.
+   and the project's `.sandcat/` directory (read-only) alongside the addon
+   script. The addon comes in two agent-specific variants
+   (`mitmproxy_addon_claude.py`, `mitmproxy_addon_cursor.py`) that share their
+   common logic via the `mitmproxy_addon_common.py` library.
 2. On startup, the addon reads all available settings files (user, project,
    local), merges them according to the precedence rules above, and writes
    `sandcat.env` to the `mitmproxy-config` shared volume
@@ -478,6 +481,57 @@ host (read-only) so your personal instructions, custom agents, and slash
 commands are available inside the container. Remove any mount whose source does
 not exist on your host — Docker will otherwise create an empty directory in its
 place.
+
+### Cursor CLI
+
+Cursor CLI support is available via `sandcat init --agent cursor`.
+
+- The current template uses temporary compatibility defaults for auth/network:
+  - **Auth passthrough via placeholder substitution.** The container sees only
+    `SANDCAT_PLACEHOLDER_CURSOR_API_KEY`; the real `CURSOR_API_KEY` is injected
+    by the mitmproxy addon only for allowed Cursor hosts.
+  - **HTTP/1 compatibility bootstrap.** On startup, Sandcat forces
+    `.network.useHttp1ForAgent = true` in Cursor CLI config to avoid known
+    proxy/TLS instability with HTTP/2 streaming through mitmproxy.
+  - **Proxy command defaults tuned for Cursor.** The generated proxy config uses
+    the Cursor addon and keeps mitmproxy HTTP/2 enabled (`http2=true`) (plus
+    streaming-safe mitmproxy
+    flags such as `stream_large_bodies=1m`, `connection_strategy=lazy`,
+    `anticomp=true`, and `timeout_read=300`).
+
+    Those streaming-safe flags are **Cursor-only** — they are intentionally
+    omitted on the Claude path (`sct_agent_mitm_streaming_flags`). With
+    `stream_large_bodies` unset, mitmproxy buffers request bodies up to ~1 MB
+    before forwarding, which lets the addon's `_substitute_secrets` run a
+    body-content scan for placeholder leaks. Setting them on Claude would
+    weaken that defence-in-depth check; on Cursor they are required to keep
+    Connect/HTTP-2 streaming responses stable, and the body-leak check is
+    instead enforced via header/URL scans plus the textual-only body-mutation
+    gate (binary protobuf bodies are left untouched).
+  - **Streaming detection is path-only.** The Cursor addon decides whether a
+    request is streaming purely from the request path
+    (`/agent.v1.AgentService/Run*`, `/aiserver.v1.RepositoryService/...`).
+    A client-supplied `content-type: application/connect+proto` header alone
+    is **not** sufficient — accepting it would let any request with the right
+    header bypass body substitution and the placeholder leak check.
+  These defaults are conservative and may be relaxed when Cursor proxy behavior
+  is consistently stable across environments.
+- Use `CURSOR_API_KEY` in your user settings for Cursor authentication.
+- On container startup, Sandcat writes
+  `.network.useHttp1ForAgent = true` to
+  `~/.config/cursor/cli-config.json` (`~/.cursor/cli-config.json` is also
+  updated for compatibility).
+- `SANDCAT_MOUNT_CURSOR_CONFIG=true` mounts `~/.cursor/AGENTS.md`,
+  `~/.cursor/rules`, and `~/.cursor/skills` into the agent container.
+- **Cursor CLI TLS through mitmproxy.** The Cursor CLI bundles its own Node.js
+  binary with compiled-in Mozilla CA roots. Sandcat sets
+  `NODE_OPTIONS=--use-openssl-ca` so the bundled Node.js uses the system CA
+  store (which includes the mitmproxy CA) instead of its built-in roots.
+  When Cursor honors that environment setting, mitmproxy can intercept Cursor
+  API traffic and perform `SANDCAT_PLACEHOLDER_CURSOR_API_KEY` substitution
+  transparently.
+- Provider-specific onboarding/bootstrap logic is intentionally minimal in this
+  first iteration and can be extended in project-level Dockerfile/scripts.
 
 ## Architecture
 
@@ -819,8 +873,11 @@ mitmproxy CA. `app-init.sh` installs it into the system trust store, which is
 enough for most tools — but some runtimes bring their own CA handling:
 
 - **Node.js** bundles its own CA certificates and ignores the system store.
-  `app-init.sh` sets `NODE_EXTRA_CA_CERTS` automatically. If you write a custom
-  entrypoint, make sure to include this or Node-based tools will fail TLS
+  `app-init.sh` sets `NODE_EXTRA_CA_CERTS` and
+  `NODE_OPTIONS=--use-openssl-ca` automatically. The `--use-openssl-ca` flag
+  is required for tools that bundle their own Node.js binary (e.g. Cursor CLI)
+  where `NODE_EXTRA_CA_CERTS` alone may not be honored. If you write a custom
+  entrypoint, make sure to include both or Node-based tools will fail TLS
   verification.
 - **Rust** programs using `rustls` with the `webpki-roots` crate bundle CA
   certificates at compile time and will not trust the mitmproxy CA. Use

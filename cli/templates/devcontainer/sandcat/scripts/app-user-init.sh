@@ -6,6 +6,10 @@
 #
 set -e
 
+# app-init uses `su - vscode` (login shell). Keep HOME explicit so git config
+# and related tools always write to the expected location.
+export HOME="/home/vscode"
+
 if [ -n "${GIT_USER_NAME:-}" ]; then
     git config --global user.name "$GIT_USER_NAME"
 fi
@@ -25,6 +29,15 @@ git config --global commit.gpgsign false
 # HTTPS transparently.
 git config --global --replace-all url."https://github.com/".insteadOf "git@github.com:" "git@github.com:"
 git config --global --replace-all url."https://github.com/".insteadOf "ssh://git@github.com/" "ssh://git@github.com/"
+
+# Mark mounted workspaces as safe Git directories to avoid
+# "detected dubious ownership" errors in devcontainers.
+for ws_dir in /workspaces/*; do
+    [ -d "$ws_dir" ] || continue
+    if ! git config --global --get-all safe.directory | grep -Fx "$ws_dir" >/dev/null 2>&1; then
+        git config --global --add safe.directory "$ws_dir"
+    fi
+done
 
 # If Java is installed (via mise), import the mitmproxy CA into Java's trust
 # store. Java uses its own cacerts and ignores the system CA store.
@@ -80,13 +93,5 @@ EOFJSON
     fi
 fi
 
-# Seed the onboarding flag so Claude Code uses the API key without interactive
-# setup. Only written when the user configured an ANTHROPIC_API_KEY secret.
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
-fi
-
-# Claude Code is installed at build time (Dockerfile.app).
-# Background update so it doesn't block startup.
-(claude install >/dev/null 2>&1 &)
+__AGENT_USER_INIT__
 
