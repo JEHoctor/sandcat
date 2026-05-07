@@ -29,6 +29,7 @@ no Basic Auth handling, body substitution always permitted).
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -48,6 +49,10 @@ SETTINGS_PATHS = [
     "/config/project/settings.local.json",  # local:   .sandcat/settings.local.json
 ]
 SANDCAT_ENV_PATH = "/home/mitmproxy/.mitmproxy/sandcat.env"
+# Sidecar file consumed by wg-client to override /etc/resolv.conf nameservers.
+# One IPv4/IPv6 address per line; empty or missing file means "use defaults".
+# (glibc/musl resolvers reject hostnames in `nameserver` directives.)
+SANDCAT_DNS_CONF_PATH = "/home/mitmproxy/.mitmproxy/dns.conf"
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +64,7 @@ class SandcatAddon:
         self.secrets: dict[str, dict] = {}  # name -> {value, hosts, placeholder}
         self.network_rules: list[dict] = []
         self.env: dict[str, str] = {}  # non-secret env vars (e.g. git identity)
+        self.dns_servers: list[str] = []  # custom upstream DNS for wg-client
         self.debug_enabled = False  # subclasses may flip this in _on_settings_merged
 
     # ------------------------------------------------------------------ load
@@ -71,6 +77,10 @@ class SandcatAddon:
                     layers.append(json.load(f))
 
         if not layers:
+            # Persisted dns.conf from a previous run must be cleared so the
+            # wg-client falls back to defaults — otherwise removing every
+            # settings file silently keeps the old custom nameservers.
+            self._write_dns_conf()
             logger.info("No settings files found — addon disabled")
             return
 
@@ -81,11 +91,13 @@ class SandcatAddon:
         self.env = merged["env"]
         self._load_secrets(merged["secrets"])
         self._load_network_rules(merged["network"])
+        self._load_dns_servers(merged["dns_servers"])
         self._write_placeholders_env()
+        self._write_dns_conf()
 
         ctx.log.info(
-            f"Loaded {len(self.env)} env var(s) and {len(self.secrets)} secret(s), "
-            f"wrote {SANDCAT_ENV_PATH}"
+            f"Loaded {len(self.env)} env var(s), {len(self.secrets)} secret(s), "
+            f"and {len(self.dns_servers)} custom DNS server(s); wrote {SANDCAT_ENV_PATH}"
         )
 
     def _on_settings_merged(self, merged: dict):
@@ -106,11 +118,13 @@ class SandcatAddon:
         - secrets: dict merge, higher precedence overwrites.
         - network: concatenated, highest precedence first (top-to-bottom matching).
         - op_service_account_token: highest precedence non-empty value wins.
+        - dns_servers: highest-precedence layer that sets the key wins (last-wins).
         """
         env: dict[str, str] = {}
         secrets: dict[str, dict] = {}
         network: list[dict] = []
         op_token: str | None = None
+        dns_servers = None
 
         for layer in layers:
             env.update(layer.get("env", {}))
@@ -118,6 +132,8 @@ class SandcatAddon:
             layer_token = layer.get("op_service_account_token")
             if layer_token:
                 op_token = layer_token
+            if "dns_servers" in layer:
+                dns_servers = layer["dns_servers"]
 
         # Network rules: highest-precedence layer's rules come first.
         for layer in reversed(layers):
@@ -128,6 +144,7 @@ class SandcatAddon:
             "secrets": secrets,
             "network": network,
             "op_service_account_token": op_token,
+            "dns_servers": dns_servers,
         }
 
     # --------------------------------------------------------------- secrets
@@ -199,6 +216,81 @@ class SandcatAddon:
         self.network_rules = raw_rules
         ctx.log.info(f"Loaded {len(self.network_rules)} network rule(s)")
 
+    # ----------------------------------------------------------- DNS servers
+
+    def _load_dns_servers(self, raw):
+        """Validate the merged ``dns_servers`` value into a list of nameserver strings.
+
+        Accepts a list of non-empty strings; anything else (None, non-list,
+        non-string entries, blank strings) is dropped with a warning. The
+        resulting list may be empty, in which case the wg-client falls back
+        to its hardcoded defaults.
+        """
+        if raw is None:
+            self.dns_servers = []
+            return
+        if not isinstance(raw, list):
+            ctx.log.warn(
+                f"dns_servers must be a list of strings, got {type(raw).__name__}; "
+                "falling back to defaults"
+            )
+            self.dns_servers = []
+            return
+        cleaned: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                ctx.log.warn(
+                    f"dns_servers entry must be a string, got {type(entry).__name__}; skipping"
+                )
+                continue
+            stripped = entry.strip()
+            if not stripped:
+                continue
+            try:
+                ipaddress.ip_address(stripped)
+            except ValueError:
+                ctx.log.warn(
+                    f"dns_servers entry {stripped!r} is not a valid IP address; skipping "
+                    "(resolv.conf nameserver requires IPv4/IPv6, not hostnames)"
+                )
+                continue
+            cleaned.append(stripped)
+        self.dns_servers = cleaned
+
+    def _write_dns_conf(self):
+        """Write nameservers for wg-client to consume, or remove a stale file.
+
+        wg-client treats a missing or empty file as "use defaults", so when no
+        custom nameservers are configured we remove any leftover file from a
+        previous run rather than writing one.
+        """
+        if not self.dns_servers:
+            try:
+                os.remove(SANDCAT_DNS_CONF_PATH)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                # Don't let a one-off filesystem error (permissions, EBUSY, …)
+                # disable the rest of the addon — wg-client will keep applying
+                # whatever it last had, which is no worse than the current run.
+                ctx.log.warn(
+                    f"Could not remove stale {SANDCAT_DNS_CONF_PATH}: {e!r}"
+                )
+            return
+        try:
+            self._atomic_write_text(
+                SANDCAT_DNS_CONF_PATH, "\n".join(self.dns_servers) + "\n"
+            )
+        except OSError as e:
+            ctx.log.warn(
+                f"Could not write {SANDCAT_DNS_CONF_PATH}: {e!r}; "
+                "wg-client will continue with its previous DNS settings"
+            )
+            return
+        ctx.log.info(
+            f"Wrote {len(self.dns_servers)} custom DNS server(s) to {SANDCAT_DNS_CONF_PATH}"
+        )
+
     def _find_matching_rule(self, method: str | None, host: str) -> dict | None:
         host = host.lower().rstrip(".")
         for rule in self.network_rules:
@@ -242,8 +334,20 @@ class SandcatAddon:
         for name, entry in self.secrets.items():
             self._validate_env_name(name)
             lines.append(f'export {name}="{self._shell_escape(entry["placeholder"])}"')
-        with open(SANDCAT_ENV_PATH, "w") as f:
-            f.write("\n".join(lines) + "\n")
+        self._atomic_write_text(SANDCAT_ENV_PATH, "\n".join(lines) + "\n")
+
+    @staticmethod
+    def _atomic_write_text(path: str, body: str):
+        """Write a sidecar file consumed by another container, atomically.
+
+        Writes to a sibling ``.tmp`` and ``os.replace``s onto the final path,
+        so a concurrent reader either sees the previous contents or the new
+        ones — never a half-written or briefly-absent file.
+        """
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            f.write(body)
+        os.replace(tmp_path, path)
 
     # ---------------------------------------------------- substitution hooks
 

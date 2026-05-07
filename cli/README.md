@@ -157,3 +157,30 @@ except provider config mounts, which default to `true` for the selected agent.
 - `SANDCAT_MOUNT_CURSOR_CONFIG` - `true` to mount host `~/.cursor` config (Cursor agent only)
 - `SANDCAT_MOUNT_GIT_READONLY` - `true` to mount `.git/` directory as read-only
 - `SANDCAT_MOUNT_IDEA_READONLY` - `true` to mount `.idea/` directory as read-only (JetBrains)
+
+## Settings reference
+
+Settings live in three optional layers, merged with the lower layer first and the higher one taking
+precedence:
+
+1. User: `~/.config/sandcat/settings.json`
+2. Project: `.sandcat/settings.json`
+3. Project local: `.sandcat/settings.local.json` (gitignored)
+
+### `dns_servers`
+
+Top-level optional array of IPv4/IPv6 addresses. Overrides the upstream DNS servers used by the
+agent's WireGuard client. Use this to point at your corporate/intranet resolver so internal
+hostnames (e.g. `*.corp.example.com`) work inside the sandbox. Empty list, omitted, or explicit
+`null` falls back to `1.1.1.1` and `8.8.8.8`. Hostnames are not accepted (resolv.conf `nameserver`
+directives require numeric IPs); invalid entries are skipped with a warning in the mitmproxy log.
+
+```json
+{
+  "dns_servers": ["10.20.0.10", "10.20.0.11"]
+}
+```
+
+Higher-precedence layers replace the entire list ("last wins"); they are not merged. Setting
+`"dns_servers": null` in a higher layer explicitly resets back to defaults regardless of what a
+lower layer set. After editing, run `sandcat restart-proxy` for the change to take effect.

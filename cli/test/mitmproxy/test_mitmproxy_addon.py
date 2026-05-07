@@ -827,9 +827,10 @@ class TestDNSProxy:
 
 @pytest.mark.parametrize("addon_cls", ADDONS)
 class TestConfigLoading:
-    def test_missing_settings_file_disables_addon(self, addon_cls):
+    def test_missing_settings_file_disables_addon(self, addon_cls, tmp_path):
         addon = addon_cls()
-        with patch(f"{_COMMON}.os.path.isfile", return_value=False):
+        with patch(f"{_COMMON}.os.path.isfile", return_value=False), \
+             patch(f"{_COMMON}.SANDCAT_DNS_CONF_PATH", str(tmp_path / "dns.conf")):
             addon.load(MagicMock())
         assert addon.env == {}
         assert addon.secrets == {}
@@ -841,7 +842,8 @@ class TestConfigLoading:
         p.write_text(json.dumps(settings))
         addon = addon_cls()
         with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
-             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(tmp_path / "sandcat.env")):
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(tmp_path / "sandcat.env")), \
+             patch(f"{_COMMON}.SANDCAT_DNS_CONF_PATH", str(tmp_path / "dns.conf")):
             addon.load(MagicMock())
         assert addon.secrets == {}
         assert len(addon.network_rules) == 1
@@ -852,7 +854,8 @@ class TestConfigLoading:
         p.write_text(json.dumps(settings))
         addon = addon_cls()
         with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
-             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(tmp_path / "sandcat.env")):
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(tmp_path / "sandcat.env")), \
+             patch(f"{_COMMON}.SANDCAT_DNS_CONF_PATH", str(tmp_path / "dns.conf")):
             addon.load(MagicMock())
         assert len(addon.secrets) == 1
         assert addon.network_rules == []
@@ -1214,7 +1217,44 @@ class TestSettingsMerging:
             "secrets": {},
             "network": [],
             "op_service_account_token": None,
+            "dns_servers": None,
         }
+
+    def test_dns_servers_highest_precedence_wins(self):
+        layers = [
+            {"dns_servers": ["10.0.0.1"]},
+            {"dns_servers": ["10.0.0.2", "10.0.0.3"]},
+        ]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["dns_servers"] == ["10.0.0.2", "10.0.0.3"]
+
+    def test_dns_servers_explicit_empty_wins_over_lower_layer(self):
+        # Higher-precedence layer explicitly sets [] → resets to "no overrides",
+        # the wg-client falls back to its hardcoded defaults.
+        layers = [
+            {"dns_servers": ["10.0.0.1"]},
+            {"dns_servers": []},
+        ]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["dns_servers"] == []
+
+    def test_dns_servers_absent(self):
+        layers = [{"env": {"A": "1"}}]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["dns_servers"] is None
+
+    def test_dns_servers_lower_layer_used_when_higher_layer_omits_key(self):
+        # Most common shape: user sets corp DNS, project doesn't touch it.
+        layers = [{"dns_servers": ["10.0.0.1"]}, {"env": {"A": "1"}}]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["dns_servers"] == ["10.0.0.1"]
+
+    def test_dns_servers_explicit_null_overrides_lower_layer(self):
+        # A higher layer with explicit null resets the merge — wg-client falls
+        # back to defaults.
+        layers = [{"dns_servers": ["10.0.0.1"]}, {"dns_servers": None}]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["dns_servers"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1391,3 +1431,137 @@ class TestCursorDebugFlag:
             addon.load(MagicMock())
         # Claude variant doesn't override _on_settings_merged → flag stays False.
         assert addon.debug_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# DNS server override — settings → dns.conf sidecar consumed by wg-client.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("addon_cls", ADDONS)
+class TestDnsServersConfig:
+    @staticmethod
+    def _load(addon_cls, settings, tmp_path):
+        # settings=None simulates the "no settings files exist" branch — the
+        # patched SETTINGS_PATHS still points at tmp_path/settings.json, but
+        # the file is never created.
+        settings_path = tmp_path / "settings.json"
+        if settings is not None:
+            settings_path.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        dns_conf_path = tmp_path / "dns.conf"
+        addon = addon_cls()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(settings_path)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.SANDCAT_DNS_CONF_PATH", str(dns_conf_path)):
+            addon.load(MagicMock())
+        return addon, dns_conf_path
+
+    def test_no_dns_servers_setting_does_not_write_file(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(addon_cls, {"env": {"A": "1"}}, tmp_path)
+        assert addon.dns_servers == []
+        assert not dns_conf_path.exists()
+
+    def test_custom_dns_servers_written_one_per_line(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(
+            addon_cls, {"dns_servers": ["10.0.0.10", "10.0.0.11"]}, tmp_path,
+        )
+        assert addon.dns_servers == ["10.0.0.10", "10.0.0.11"]
+        assert dns_conf_path.read_text() == "10.0.0.10\n10.0.0.11\n"
+
+    def test_empty_list_skips_file_so_wg_client_uses_defaults(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(addon_cls, {"dns_servers": []}, tmp_path)
+        assert addon.dns_servers == []
+        assert not dns_conf_path.exists()
+
+    def test_malformed_non_list_skipped(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(
+            addon_cls, {"dns_servers": "10.0.0.10"}, tmp_path,
+        )
+        assert addon.dns_servers == []
+        assert not dns_conf_path.exists()
+
+    def test_non_string_entries_dropped(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(
+            addon_cls,
+            {"dns_servers": ["10.0.0.10", 1234, None, "10.0.0.11"]},
+            tmp_path,
+        )
+        assert addon.dns_servers == ["10.0.0.10", "10.0.0.11"]
+        assert dns_conf_path.read_text() == "10.0.0.10\n10.0.0.11\n"
+
+    def test_blank_entries_dropped(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(
+            addon_cls,
+            {"dns_servers": ["", "  ", "10.0.0.10", "\t"]},
+            tmp_path,
+        )
+        assert addon.dns_servers == ["10.0.0.10"]
+        assert dns_conf_path.read_text() == "10.0.0.10\n"
+
+    def test_entries_are_stripped(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(
+            addon_cls, {"dns_servers": ["  10.0.0.10  ", "\t10.0.0.11"]}, tmp_path,
+        )
+        assert addon.dns_servers == ["10.0.0.10", "10.0.0.11"]
+
+    @pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+    def test_entries_with_embedded_newlines_dropped(self, addon_cls, tmp_path, separator):
+        addon, dns_conf_path = self._load(
+            addon_cls,
+            {"dns_servers": [f"10.0.0.10{separator}evil-line", "10.0.0.11"]},
+            tmp_path,
+        )
+        assert addon.dns_servers == ["10.0.0.11"]
+        assert dns_conf_path.read_text() == "10.0.0.11\n"
+
+    def test_stale_dns_conf_overwritten_with_new_contents(self, addon_cls, tmp_path):
+        # A previous run wrote nameservers; a new load with different values
+        # must replace the file exactly (no leftover stale lines).
+        (tmp_path / "dns.conf").write_text("9.9.9.9\n9.9.9.10\n")
+        _, dns_conf_path = self._load(
+            addon_cls, {"dns_servers": ["10.0.0.10"]}, tmp_path,
+        )
+        assert dns_conf_path.read_text() == "10.0.0.10\n"
+
+    @pytest.mark.parametrize("bad_entry", [
+        "not-an-ip",
+        "intranet.corp.example.com",
+        "1.1.1.1; rm -rf /",
+        "999.999.999.999",
+        "10.0.0",
+    ])
+    def test_non_ip_entries_dropped(self, addon_cls, tmp_path, bad_entry):
+        addon, dns_conf_path = self._load(
+            addon_cls,
+            {"dns_servers": [bad_entry, "10.0.0.10"]},
+            tmp_path,
+        )
+        assert addon.dns_servers == ["10.0.0.10"]
+        assert dns_conf_path.read_text() == "10.0.0.10\n"
+
+    def test_ipv6_entries_accepted(self, addon_cls, tmp_path):
+        addon, dns_conf_path = self._load(
+            addon_cls,
+            {"dns_servers": ["2001:4860:4860::8888", "::1"]},
+            tmp_path,
+        )
+        assert addon.dns_servers == ["2001:4860:4860::8888", "::1"]
+        assert dns_conf_path.read_text() == "2001:4860:4860::8888\n::1\n"
+
+    def test_stale_dns_conf_removed_when_all_settings_files_absent(
+        self, addon_cls, tmp_path,
+    ):
+        # Persistent volume case: a previous run wrote dns.conf, then the user
+        # deletes every settings layer. The next load must clear the sidecar so
+        # wg-client falls back to defaults — otherwise the old corp DNS sticks.
+        (tmp_path / "dns.conf").write_text("10.0.0.99\n")
+        _, dns_conf_path = self._load(addon_cls, None, tmp_path)
+        assert not dns_conf_path.exists()
+
+    def test_stale_dns_conf_removed_when_setting_dropped(self, addon_cls, tmp_path):
+        # Simulate a previous run that wrote dns.conf, then the user removes
+        # `dns_servers` from settings — the file must be cleaned up so wg-client
+        # falls back to defaults.
+        (tmp_path / "dns.conf").write_text("10.0.0.99\n")
+        _, dns_conf_path = self._load(addon_cls, {"env": {"A": "1"}}, tmp_path)
+        assert not dns_conf_path.exists()
