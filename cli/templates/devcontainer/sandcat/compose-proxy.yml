@@ -7,16 +7,34 @@ services:
       dockerfile: Dockerfile.wg-client
     volumes:
       - mitmproxy-config:/mitmproxy-config:ro
+      # Sibling containers share wg-client's network namespace via network_mode
+      # but each get their own /etc/resolv.conf; this volume lets wg-client
+      # publish its resolv.conf for siblings to copy on init.
+      - wg-runtime:/run/sandcat
     cap_add:
       - NET_ADMIN # required for WireGuard interface and iptables setup
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1 # required by WireGuard fwmark routing; can't be set inside the container (/proc/sys is read-only)
+    # DNS exfiltration sink for Docker's embedded resolver at 127.0.0.11.
+    # Sibling-container names are still resolved locally by the embedded DNS;
+    # any other name under the compose project's search domain (e.g. an
+    # attacker-crafted `<payload>.<project>_default`) gets forwarded by the
+    # daemon to this address, which is unroutable per RFC 5737 (TEST-NET-1)
+    # and so fails fast without ever leaving the host. Closes the bypass that
+    # would otherwise route such queries to the host's upstream resolver,
+    # invisible to mitmproxy.
+    dns:
+      - 192.0.2.1
     command: sleep infinity
     depends_on:
       mitmproxy:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "test", "-f", "/tmp/wg-ready"]
+      # /tmp/wg-ready is touched once at end of init; dnsmasq-ready (shared
+      # with the in-script wait loop) detects a dead dnsmasq, since every
+      # sibling container's DNS funnels through 127.0.0.1:53 and a silent
+      # crash would black-hole resolution.
+      test: ["CMD-SHELL", "test -f /tmp/wg-ready && /usr/local/bin/dnsmasq-ready"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -39,3 +57,4 @@ services:
 
 volumes:
   mitmproxy-config:
+  wg-runtime:

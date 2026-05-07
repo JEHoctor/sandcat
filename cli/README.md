@@ -184,3 +184,25 @@ directives require numeric IPs); invalid entries are skipped with a warning in t
 Higher-precedence layers replace the entire list ("last wins"); they are not merged. Setting
 `"dns_servers": null` in a higher layer explicitly resets back to defaults regardless of what a
 lower layer set. After editing, run `sandcat restart-proxy` for the change to take effect.
+
+### Container-to-container DNS
+
+The agent can resolve sibling containers on the same Docker compose network by name (e.g. a
+`db:` service in `compose.yml` is reachable as `db`). Internally the wg-client runs a small
+`dnsmasq` that splits DNS: queries under the compose project's network (the `search` domain
+Docker assigns to the container) go to Docker's embedded resolver at `127.0.0.11`, while
+everything else is forwarded through the WireGuard tunnel to mitmproxy and out via the
+configured upstream. No configuration is required.
+
+The agent shares wg-client's network namespace via `network_mode` but Docker still gives each
+container its own `/etc/resolv.conf` in its own mount namespace. wg-client publishes its
+resolv.conf onto a shared `wg-runtime` volume mounted read-only at `/run/sandcat` in the
+agent, and `app-init.sh` copies it into `/etc/resolv.conf` on startup so the agent's lookups
+also go through the local dnsmasq.
+
+To prevent the search-domain carve-out from becoming a DNS exfiltration channel — where an
+attacker-crafted name like `<payload>.<project>_default` would otherwise be forwarded by
+Docker's embedded resolver to the host's upstream DNS, bypassing mitmproxy — wg-client is
+launched with a `dns:` sink (RFC 5737 `192.0.2.1`). Sibling-container names continue to
+resolve locally; everything else under the search domain that isn't a known sibling fails
+fast without leaving the host.

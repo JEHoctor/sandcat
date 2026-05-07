@@ -8,25 +8,40 @@
 setup() {
 	load test_helper
 	ADDON="$SCT_TEMPLATEDIR/devcontainer/sandcat/scripts/mitmproxy_addon_common.py"
-	WG_INIT="$SCT_TEMPLATEDIR/devcontainer/sandcat/scripts/wg-client-init.sh"
+	APP_INIT="$SCT_TEMPLATEDIR/devcontainer/sandcat/scripts/app-init.sh"
 	COMPOSE="$SCT_TEMPLATEDIR/devcontainer/sandcat/compose-proxy.yml"
+	COMPOSE_ALL="$SCT_TEMPLATEDIR/devcontainer/compose-all.yml"
+}
+
+# Extract the first double-quoted string from the line in $1 that begins with
+# the literal prefix $2. Used to read the dns.conf path from each side of the
+# producer/consumer pair so the parsing rule lives in one place.
+extract_quoted_value() {
+	local file="$1" prefix_pattern="$2"
+	grep -E "$prefix_pattern" "$file" | sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+addon_dns_conf_path() {
+	extract_quoted_value "$ADDON" '^SANDCAT_DNS_CONF_PATH = '
+}
+
+wg_dns_conf_path() {
+	extract_quoted_value "$WG_CLIENT_INIT" '^DNS_CONF='
 }
 
 @test "addon and wg-client agree on the dns.conf basename" {
-	local addon_path
-	addon_path=$(grep -E '^SANDCAT_DNS_CONF_PATH = ' "$ADDON" | sed -E 's/.*"([^"]+)".*/\1/')
-	local wg_path
-	wg_path=$(grep -E '^DNS_CONF=' "$WG_INIT" | sed -E 's/.*"([^"]+)".*/\1/')
+	local addon_path wg_path
+	addon_path=$(addon_dns_conf_path)
+	wg_path=$(wg_dns_conf_path)
 
-	[ -n "$addon_path" ]
-	[ -n "$wg_path" ]
+	[[ -n "$addon_path" ]]
+	[[ -n "$wg_path" ]]
 	assert_equal "$(basename "$addon_path")" "$(basename "$wg_path")"
 }
 
 @test "compose-proxy.yml mounts mitmproxy-config at the addon's write directory" {
-	local addon_path addon_dir
-	addon_path=$(grep -E '^SANDCAT_DNS_CONF_PATH = ' "$ADDON" | sed -E 's/.*"([^"]+)".*/\1/')
-	addon_dir=$(dirname "$addon_path")
+	local addon_dir
+	addon_dir=$(dirname "$(addon_dns_conf_path)")
 
 	addon_dir="$addon_dir" yq -e "
 		.services.mitmproxy.volumes[] |
@@ -35,12 +50,36 @@ setup() {
 }
 
 @test "compose-proxy.yml mounts mitmproxy-config at wg-client's read directory" {
-	local wg_path wg_dir
-	wg_path=$(grep -E '^DNS_CONF=' "$WG_INIT" | sed -E 's/.*"([^"]+)".*/\1/')
-	wg_dir=$(dirname "$wg_path")
+	local wg_dir
+	wg_dir=$(dirname "$(wg_dns_conf_path)")
 
 	wg_dir="$wg_dir" yq -e "
 		.services.\"wg-client\".volumes[] |
 		select(. == \"mitmproxy-config:\" + env(wg_dir) + \":ro\")
 	" "$COMPOSE"
+}
+
+@test "wg-client and app-init agree on the shared resolv.conf path" {
+	local wg_path app_path
+	wg_path=$(extract_quoted_value "$WG_CLIENT_INIT" '^SHARED_RESOLV_CONF=')
+	app_path=$(extract_quoted_value "$APP_INIT" '^SHARED_RESOLV_CONF=')
+
+	[[ -n "$wg_path" ]]
+	[[ -n "$app_path" ]]
+	assert_equal "$wg_path" "$app_path"
+}
+
+@test "wg-runtime is mounted writable in wg-client and read-only in agent at the shared dir" {
+	local shared_dir
+	shared_dir=$(dirname "$(extract_quoted_value "$WG_CLIENT_INIT" '^SHARED_RESOLV_CONF=')")
+
+	shared_dir="$shared_dir" yq -e "
+		.services.\"wg-client\".volumes[] |
+		select(. == \"wg-runtime:\" + env(shared_dir))
+	" "$COMPOSE"
+
+	shared_dir="$shared_dir" yq -e "
+		.services.agent.volumes[] |
+		select(. == \"wg-runtime:\" + env(shared_dir) + \":ro\")
+	" "$COMPOSE_ALL"
 }

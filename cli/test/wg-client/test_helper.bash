@@ -24,3 +24,6 @@ export SCT_LIBEXECDIR="$SCT_ROOT/libexec"
 
 WG_CLIENT_INIT="$SCT_TEMPLATEDIR/devcontainer/sandcat/scripts/wg-client-init.sh"
 export WG_CLIENT_INIT
+
+# shellcheck source=../../templates/devcontainer/sandcat/scripts/wg-client-init.sh
+source "$WG_CLIENT_INIT"

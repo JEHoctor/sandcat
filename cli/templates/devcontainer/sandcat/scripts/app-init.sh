@@ -8,6 +8,17 @@
 #
 set -e
 
+# Adopt wg-client's resolv.conf. We share its network namespace via
+# network_mode but each container has its own /etc/resolv.conf in its own
+# mount namespace, so we have to copy it explicitly to point our DNS at
+# wg-client's local dnsmasq (127.0.0.1) instead of whatever Docker wrote here.
+# Use cat (not cp) because /etc/resolv.conf is bind-mounted by Docker and
+# can't be replaced — only its contents can be rewritten in-place.
+SHARED_RESOLV_CONF="/run/sandcat/resolv.conf"
+if [ -f "$SHARED_RESOLV_CONF" ]; then
+    cat "$SHARED_RESOLV_CONF" > /etc/resolv.conf
+fi
+
 CA_CERT="/mitmproxy-config/mitmproxy-ca-cert.pem"
 
 # The CA cert is guaranteed to exist: app depends_on wg-client (healthy),
