@@ -25,7 +25,9 @@ services:
     # invisible to mitmproxy.
     dns:
       - 192.0.2.1
-    command: sleep infinity
+    # Backstop for script-level crashes (oom, SIGKILL); dnsmasq itself is
+    # supervised in-script to keep the network namespace alive for siblings.
+    restart: unless-stopped
     depends_on:
       mitmproxy:
         condition: service_healthy
@@ -50,7 +52,10 @@ services:
       - ./scripts/mitmproxy_addon_common.py:/scripts/mitmproxy_addon_common.py:ro
       - ~/.config/sandcat/settings.json:/config/settings.json:ro
     healthcheck:
-      test: ["CMD", "sh", "-c", "test -f /home/mitmproxy/.mitmproxy/wireguard.conf && test -f /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem"]
+      # dns.conf is written by the addon's load() hook; gating on its
+      # presence means wg-client (which reads it at startup) cannot race
+      # ahead of addon registration and silently fall back to defaults.
+      test: ["CMD", "sh", "-c", "test -f /home/mitmproxy/.mitmproxy/wireguard.conf && test -f /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem && test -f /home/mitmproxy/.mitmproxy/dns.conf"]
       interval: 2s
       timeout: 2s
       retries: 15

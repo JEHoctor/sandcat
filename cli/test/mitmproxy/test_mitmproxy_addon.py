@@ -1456,10 +1456,13 @@ class TestDnsServersConfig:
             addon.load(MagicMock())
         return addon, dns_conf_path
 
-    def test_no_dns_servers_setting_does_not_write_file(self, addon_cls, tmp_path):
+    def test_no_dns_servers_setting_writes_empty_file(self, addon_cls, tmp_path):
+        # Empty file (not absent) so its presence is a valid "addon loaded"
+        # sentinel for the mitmproxy healthcheck; wg-client treats empty as
+        # "no overrides — use defaults".
         addon, dns_conf_path = self._load(addon_cls, {"env": {"A": "1"}}, tmp_path)
         assert addon.dns_servers == []
-        assert not dns_conf_path.exists()
+        assert dns_conf_path.read_text() == ""
 
     def test_custom_dns_servers_written_one_per_line(self, addon_cls, tmp_path):
         addon, dns_conf_path = self._load(
@@ -1468,17 +1471,17 @@ class TestDnsServersConfig:
         assert addon.dns_servers == ["10.0.0.10", "10.0.0.11"]
         assert dns_conf_path.read_text() == "10.0.0.10\n10.0.0.11\n"
 
-    def test_empty_list_skips_file_so_wg_client_uses_defaults(self, addon_cls, tmp_path):
+    def test_empty_list_writes_empty_file_so_wg_client_uses_defaults(self, addon_cls, tmp_path):
         addon, dns_conf_path = self._load(addon_cls, {"dns_servers": []}, tmp_path)
         assert addon.dns_servers == []
-        assert not dns_conf_path.exists()
+        assert dns_conf_path.read_text() == ""
 
     def test_malformed_non_list_skipped(self, addon_cls, tmp_path):
         addon, dns_conf_path = self._load(
             addon_cls, {"dns_servers": "10.0.0.10"}, tmp_path,
         )
         assert addon.dns_servers == []
-        assert not dns_conf_path.exists()
+        assert dns_conf_path.read_text() == ""
 
     def test_non_string_entries_dropped(self, addon_cls, tmp_path):
         addon, dns_conf_path = self._load(
@@ -1548,7 +1551,7 @@ class TestDnsServersConfig:
         assert addon.dns_servers == ["2001:4860:4860::8888", "::1"]
         assert dns_conf_path.read_text() == "2001:4860:4860::8888\n::1\n"
 
-    def test_stale_dns_conf_removed_when_all_settings_files_absent(
+    def test_stale_dns_conf_cleared_when_all_settings_files_absent(
         self, addon_cls, tmp_path,
     ):
         # Persistent volume case: a previous run wrote dns.conf, then the user
@@ -1556,12 +1559,12 @@ class TestDnsServersConfig:
         # wg-client falls back to defaults — otherwise the old corp DNS sticks.
         (tmp_path / "dns.conf").write_text("10.0.0.99\n")
         _, dns_conf_path = self._load(addon_cls, None, tmp_path)
-        assert not dns_conf_path.exists()
+        assert dns_conf_path.read_text() == ""
 
-    def test_stale_dns_conf_removed_when_setting_dropped(self, addon_cls, tmp_path):
+    def test_stale_dns_conf_cleared_when_setting_dropped(self, addon_cls, tmp_path):
         # Simulate a previous run that wrote dns.conf, then the user removes
-        # `dns_servers` from settings — the file must be cleaned up so wg-client
-        # falls back to defaults.
+        # `dns_servers` from settings — the file must be overwritten empty so
+        # wg-client falls back to defaults.
         (tmp_path / "dns.conf").write_text("10.0.0.99\n")
         _, dns_conf_path = self._load(addon_cls, {"env": {"A": "1"}}, tmp_path)
-        assert not dns_conf_path.exists()
+        assert dns_conf_path.read_text() == ""

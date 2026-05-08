@@ -77,9 +77,9 @@ class SandcatAddon:
                     layers.append(json.load(f))
 
         if not layers:
-            # Persisted dns.conf from a previous run must be cleared so the
-            # wg-client falls back to defaults — otherwise removing every
-            # settings file silently keeps the old custom nameservers.
+            # Write an empty dns.conf so wg-client treats it as "no overrides"
+            # (falling back to defaults) AND so the file's presence still
+            # signals "addon has loaded" for the mitmproxy healthcheck.
             self._write_dns_conf()
             logger.info("No settings files found — addon disabled")
             return
@@ -258,38 +258,30 @@ class SandcatAddon:
         self.dns_servers = cleaned
 
     def _write_dns_conf(self):
-        """Write nameservers for wg-client to consume, or remove a stale file.
+        """Write nameservers for wg-client to consume.
 
-        wg-client treats a missing or empty file as "use defaults", so when no
-        custom nameservers are configured we remove any leftover file from a
-        previous run rather than writing one.
+        Always writes the file (one IP per line; empty when no overrides) so
+        its presence is a load-order sentinel: the mitmproxy healthcheck
+        gates wg-client startup on this file existing, eliminating the race
+        where wg-client could otherwise read an absent dns.conf and silently
+        fall back to defaults before the addon had a chance to write it.
+        wg-client treats an empty file as "no overrides — use defaults".
         """
-        if not self.dns_servers:
-            try:
-                os.remove(SANDCAT_DNS_CONF_PATH)
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                # Don't let a one-off filesystem error (permissions, EBUSY, …)
-                # disable the rest of the addon — wg-client will keep applying
-                # whatever it last had, which is no worse than the current run.
-                ctx.log.warn(
-                    f"Could not remove stale {SANDCAT_DNS_CONF_PATH}: {e!r}"
-                )
-            return
+        body = "\n".join(self.dns_servers)
+        if self.dns_servers:
+            body += "\n"
         try:
-            self._atomic_write_text(
-                SANDCAT_DNS_CONF_PATH, "\n".join(self.dns_servers) + "\n"
-            )
+            self._atomic_write_text(SANDCAT_DNS_CONF_PATH, body)
         except OSError as e:
             ctx.log.warn(
                 f"Could not write {SANDCAT_DNS_CONF_PATH}: {e!r}; "
                 "wg-client will continue with its previous DNS settings"
             )
             return
-        ctx.log.info(
-            f"Wrote {len(self.dns_servers)} custom DNS server(s) to {SANDCAT_DNS_CONF_PATH}"
-        )
+        if self.dns_servers:
+            ctx.log.info(
+                f"Wrote {len(self.dns_servers)} custom DNS server(s) to {SANDCAT_DNS_CONF_PATH}"
+            )
 
     def _find_matching_rule(self, method: str | None, host: str) -> dict | None:
         host = host.lower().rstrip(".")

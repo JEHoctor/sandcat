@@ -279,8 +279,24 @@ main() {
     # Signal readiness to containers waiting on the healthcheck.
     touch /tmp/wg-ready
 
-    # Hand off to the container's main command (e.g. "sleep infinity").
-    exec "$@"
+    supervise_dnsmasq "$DNSMASQ_CONF"
+}
+
+# Keep dnsmasq alive in-place. Sibling containers share this container's
+# network namespace via `network_mode: service:wg-client`; that binding is
+# resolved at sibling-create time, so a wg-client container restart would
+# leave the agent attached to a now-destroyed namespace. Supervising dnsmasq
+# locally — instead of letting the container exit and rely on Docker's
+# restart policy — keeps the namespace intact across dnsmasq crashes.
+supervise_dnsmasq() {
+    local conf="$1"
+    while true; do
+        sleep 5
+        if ! dnsmasq-ready; then
+            echo "[wg-client] dnsmasq not listening; restarting" >&2
+            dnsmasq --conf-file="$conf" || true
+        fi
+    done
 }
 
 if [[ "${BASH_SOURCE[0]}" = "${0}" ]]; then
