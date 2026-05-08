@@ -83,7 +83,9 @@ git clone https://github.com/VirtusLab/sandcat.git
 export PATH="$PWD/sandcat/cli/bin:$PATH"
 ```
 
-`yq` is required to edit compose files.
+`yq` is required to edit compose files. Sandcat uses [Mike Farah's Go `yq`](https://github.com/mikefarah/yq); the unrelated Python `yq` (kislyuk/yq) is **not** compatible.
+
+On Debian/Ubuntu, `apt install yq` installs the Python variant. Install Mike Farah's `yq` instead — for example `snap install yq`, or download a binary from the [release page](https://github.com/mikefarah/yq/releases). Homebrew, Alpine `apk`, and the project's own Docker image already ship the correct one.
 
 ### 2. Initialize the sandbox for your project
 
