@@ -187,6 +187,8 @@ no files exist, the addon disables itself.
 - `network` — concatenated; highest-precedence rules come first. Since rules are
   evaluated top-to-bottom with first-match-wins, this means local rules take
   priority over project rules, which take priority over user rules.
+- `dns_servers` — last-wins; the highest-precedence layer that sets the key
+  replaces the entire list (see [DNS resolution](#dns-resolution)).
 
 A typical setup keeps user-specific settings (git identity, API keys) in the
 user file, project-wide network rules in the project file, and developer
@@ -335,6 +337,54 @@ With the liberal template rules:
 - `POST` to `api.anthropic.com` → **allowed** (rule 4)
 - `POST` to `example.com` → **denied**
 - Empty network list → all requests **denied** (default deny)
+
+## DNS resolution
+
+Queries that aren't refused by the network rules are resolved by a small
+`dnsmasq` running inside `wg-client`, which splits traffic two ways: sibling
+containers go to Docker's embedded resolver locally, everything else goes
+through the WireGuard tunnel to mitmproxy and out via the configured upstream.
+
+### Custom upstream DNS — `dns_servers`
+
+Top-level optional array of IPv4/IPv6 addresses. Overrides the upstream DNS
+servers used by the WireGuard tunnel. Point this at a corporate/intranet
+resolver to make internal hostnames (e.g. `*.corp.example.com`) work inside
+the sandbox. Empty list, omitted, or explicit `null` falls back to `1.1.1.1`
+and `8.8.8.8`. Hostnames are not accepted (resolv.conf `nameserver` directives
+require numeric IPs); invalid entries are skipped with a warning.
+
+```json
+{
+  "dns_servers": ["10.20.0.10", "10.20.0.11"]
+}
+```
+
+Higher-precedence layers replace the entire list; they are not merged. Setting
+`"dns_servers": null` in a higher layer resets back to defaults regardless of
+what a lower layer set. Run `sandcat restart-proxy` after editing.
+
+### Container-to-container DNS
+
+The agent can resolve sibling containers on the same Docker compose network by
+name (e.g. a `db:` service in `compose.yml` is reachable as `db`). Queries
+under the compose project's network (the `search` domain Docker assigns to
+the container) go to Docker's embedded resolver at `127.0.0.11`. No
+configuration is required.
+
+The agent shares wg-client's network namespace via `network_mode` but Docker
+still gives each container its own `/etc/resolv.conf` in its own mount
+namespace. wg-client publishes its resolv.conf onto a shared `wg-runtime`
+volume mounted read-only at `/run/sandcat` in the agent, and `app-init.sh`
+copies it into `/etc/resolv.conf` on startup so the agent's lookups also go
+through the local dnsmasq.
+
+To prevent the search-domain carve-out from becoming a DNS exfiltration
+channel — where an attacker-crafted name like `<payload>.<project>_default`
+would otherwise be forwarded by Docker's embedded resolver to the host's
+upstream DNS, bypassing mitmproxy — wg-client is launched with a `dns:` sink
+(RFC 5737 `192.0.2.1`). Sibling names still resolve locally; anything else
+under the search domain fails fast without leaving the host.
 
 ## Secret substitution
 
@@ -822,6 +872,38 @@ secrets are configured:
 - Check that the destination host matches the secret's `hosts` allowlist
 - Run `sandcat restart-proxy` after editing settings — the addon only reads
   settings at startup
+
+**No network inside the container on some Wi-Fi networks.** If the sandbox has
+no connectivity on one network but works on another, the network is likely
+blocking outbound DNS (port 53) to the public resolvers sandcat uses by default
+(`1.1.1.1`, `8.8.8.8`). This is common on corporate, hotel, and guest Wi-Fi,
+which force their own resolver. The symptom is DNS-only: name lookups fail
+inside the container while the host still browses fine (the host uses the
+network's resolver; the container does not).
+
+Fix: point the container at the network's own resolver via
+[`dns_servers`](#custom-upstream-dns--dns_servers). First find the resolver IP:
+
+```sh
+# macOS
+scutil --dns | awk '/nameserver\[0\]/ {print $3; exit}'
+# Linux (systemd-resolved)
+resolvectl status | awk '/Current DNS Server/ {print $4; exit}'
+# Fallback: your default gateway is often the resolver
+#   macOS:  route -n get default | awk '/gateway/{print $2}'
+#   Linux:  ip route | awk '/default/{print $3; exit}'
+```
+
+Then set it in `.sandcat/settings.local.json` (local, not committed) — or
+`~/.config/sandcat/settings.json` to cover all projects:
+
+```json
+{ "dns_servers": ["10.0.0.1"] }
+```
+
+The value is network-specific; update or remove it when you change networks.
+Run `sandcat restart-proxy` to apply it (or `sandcat run` if the sandbox isn't
+started yet).
 
 **CA certificate issues.** If you see TLS errors inside the container, the
 mitmproxy CA may not be trusted. See [TLS and CA

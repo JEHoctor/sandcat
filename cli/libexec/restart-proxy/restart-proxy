@@ -25,6 +25,12 @@ restart-proxy() {
 
 	echo "Restarting proxy service..." | info
 	docker compose -f "$compose_file" restart mitmproxy
+	# Wait for mitmproxy to become healthy before restarting wg-client. The
+	# addon rewrites dns.conf (the healthcheck sentinel) only after it has
+	# reloaded settings; restarting wg-client before that would re-read a
+	# stale dns.conf and keep the old upstream DNS. `restart` bypasses the
+	# compose depends_on health gate, so we wait explicitly here.
+	docker compose -f "$compose_file" up -d --wait --wait-timeout 60 mitmproxy
 	docker compose -f "$compose_file" restart wg-client
 	echo "Proxy restarted. New settings are now active." | info
 }

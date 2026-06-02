@@ -7,22 +7,50 @@ services:
       dockerfile: Dockerfile.wg-client
     volumes:
       - mitmproxy-config:/mitmproxy-config:ro
+      # Sibling containers share wg-client's network namespace via network_mode
+      # but each get their own /etc/resolv.conf; this volume lets wg-client
+      # publish its resolv.conf for siblings to copy on init.
+      - wg-runtime:/run/sandcat
     cap_add:
       - NET_ADMIN # required for WireGuard interface and iptables setup
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1 # required by WireGuard fwmark routing; can't be set inside the container (/proc/sys is read-only)
-    command: sleep infinity
+    # DNS exfiltration sink for Docker's embedded resolver at 127.0.0.11.
+    # Sibling-container names are still resolved locally by the embedded DNS;
+    # any other name under the compose project's search domain (e.g. an
+    # attacker-crafted `<payload>.<project>_default`) gets forwarded by the
+    # daemon to this address, which is unroutable per RFC 5737 (TEST-NET-1)
+    # and so fails fast without ever leaving the host. Closes the bypass that
+    # would otherwise route such queries to the host's upstream resolver,
+    # invisible to mitmproxy.
+    dns:
+      - 192.0.2.1
+    # Backstop for script-level crashes (oom, SIGKILL); dnsmasq itself is
+    # supervised in-script to keep the network namespace alive for siblings.
+    restart: unless-stopped
     depends_on:
       mitmproxy:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "test", "-f", "/tmp/wg-ready"]
+      # /tmp/wg-ready is touched once at end of init; dnsmasq-ready (shared
+      # with the in-script wait loop) detects a dead dnsmasq, since every
+      # sibling container's DNS funnels through 127.0.0.1:53 and a silent
+      # crash would black-hole resolution.
+      test: ["CMD-SHELL", "test -f /tmp/wg-ready && /usr/local/bin/dnsmasq-ready"]
       interval: 2s
       timeout: 2s
       retries: 15
 
   mitmproxy:
     image: mitmproxy/mitmproxy:latest
+    # Delete the stale dns.conf sentinel before mitmweb starts (see healthcheck
+    # below). The mitmproxy-config volume persists across restarts, so a dns.conf
+    # left by a previous run would satisfy the healthcheck immediately — letting
+    # wg-client start and read outdated upstream DNS (e.g. after editing
+    # `dns_servers`) before the addon rewrites it. Wrap the image entrypoint (not
+    # the command) so docker-entrypoint.sh still sees `mitmweb` as $1 and drops
+    # privileges to the mitmproxy user.
+    entrypoint: ["/bin/sh", "-c", "rm -f /home/mitmproxy/.mitmproxy/dns.conf && exec docker-entrypoint.sh \"$@\"", "sh"]
     command: mitmweb --mode wireguard --web-host 0.0.0.0 --set web_password=mitmproxy --set http2=__MITM_HTTP2__ __AGENT_MITM_STREAMING_FLAGS__ -s /scripts/__AGENT_MITM_ADDON__
     ports:
       - "8081" # mitmweb UI; host port assigned dynamically to avoid conflicts
@@ -32,10 +60,15 @@ services:
       - ./scripts/mitmproxy_addon_common.py:/scripts/mitmproxy_addon_common.py:ro
       - ~/.config/sandcat/settings.json:/config/settings.json:ro
     healthcheck:
-      test: ["CMD", "sh", "-c", "test -f /home/mitmproxy/.mitmproxy/wireguard.conf && test -f /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem"]
+      # dns.conf is written (last) by the addon's load() hook and cleared by
+      # the entrypoint above on each start, so gating on its presence means
+      # wg-client (which reads it at startup) cannot race ahead of the addon
+      # and silently fall back to defaults or a stale upstream.
+      test: ["CMD", "sh", "-c", "test -f /home/mitmproxy/.mitmproxy/wireguard.conf && test -f /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem && test -f /home/mitmproxy/.mitmproxy/dns.conf"]
       interval: 2s
       timeout: 2s
       retries: 15
 
 volumes:
   mitmproxy-config:
+  wg-runtime:
