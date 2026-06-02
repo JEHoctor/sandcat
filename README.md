@@ -871,6 +871,38 @@ secrets are configured:
 - Run `sandcat restart-proxy` after editing settings — the addon only reads
   settings at startup
 
+**No network inside the container on some Wi-Fi networks.** If the sandbox has
+no connectivity on one network but works on another, the network is likely
+blocking outbound DNS (port 53) to the public resolvers sandcat uses by default
+(`1.1.1.1`, `8.8.8.8`). This is common on corporate, hotel, and guest Wi-Fi,
+which force their own resolver. The symptom is DNS-only: name lookups fail
+inside the container while the host still browses fine (the host uses the
+network's resolver; the container does not).
+
+Fix: point the container at the network's own resolver via
+[`dns_servers`](#custom-upstream-dns--dns_servers). First find the resolver IP:
+
+```sh
+# macOS
+scutil --dns | awk '/nameserver\[0\]/ {print $3; exit}'
+# Linux (systemd-resolved)
+resolvectl status | awk '/Current DNS Server/ {print $4; exit}'
+# Fallback: your default gateway is often the resolver
+#   macOS:  route -n get default | awk '/gateway/{print $2}'
+#   Linux:  ip route | awk '/default/{print $3; exit}'
+```
+
+Then set it in `.sandcat/settings.local.json` (local, not committed) — or
+`~/.config/sandcat/settings.json` to cover all projects:
+
+```json
+{ "dns_servers": ["10.0.0.1"] }
+```
+
+The value is network-specific; update or remove it when you change networks.
+Run `sandcat restart-proxy` to apply it (or `sandcat run` if the sandbox isn't
+started yet).
+
 **CA certificate issues.** If you see TLS errors inside the container, the
 mitmproxy CA may not be trusted. See [TLS and CA
 certificates](#tls-and-ca-certificates) for runtime-specific configuration.
