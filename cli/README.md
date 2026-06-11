@@ -17,8 +17,9 @@ Options:
 - `--ide` - IDE for devcontainer mode: `vscode`, `jetbrains`, `none` (skips prompt)
 - `--stacks` - Comma-separated development stacks to install: `node`, `python`, `java`, `rust`, `go`, `scala`, `ruby`, `dotnet`, `zig` (skips prompt)
 - `--proxy` - Proxy UI mode: `web` (default, mitmweb browser UI) or `tui` (mitmproxy console, use with `sandcat proxy` to attach)
-- `--features` - Comma-separated optional features: `tui` (proxy console mode), `1password` (1Password secret resolution via `op` CLI)
-- `--1password` - Shorthand for `--features 1password`
+- `--secret-provider` / `--sp` - Secret backend: `none` (default), `1password`, `protonpass` (skips prompt when set)
+- `--1password` - Deprecated alias for `--secret-provider 1password`
+- `--features` - Comma-separated optional non-provider features: `tui` (proxy console mode; prefer `--proxy tui`)
 - `--name` - Project name for Docker Compose (default: derived from directory name)
 - `--path` - Project directory (default: current directory)
 
@@ -34,8 +35,60 @@ sandcat init --agent claude --ide vscode --stacks "python,node" --name myproject
 sandcat init --agent cursor --ide vscode --stacks "python,node" --name myproject --path /some/dir
 
 # With 1Password integration
-sandcat init --agent claude --ide vscode --features "1password" --name myproject
+sandcat init --agent claude --ide vscode --secret-provider 1password --name myproject
+
+# With Proton Pass integration
+sandcat init --agent claude --ide vscode --secret-provider protonpass --name myproject
 ```
+
+#### Proton Pass setup (scoped Personal Access Token)
+
+Proton Pass uses a **Personal Access Token (PAT)** — not your account password. A PAT starts with zero access and you explicitly grant it read-only access to only the vaults or items sandcat needs. This means the mitmproxy container can only see the secrets you chose, nothing else.
+
+```bash
+# 1. Create a PAT with zero access (valid 3 months)
+pass-cli pat create --name "sandcat" --expiration 3m
+# → prints: PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_xxxx...xxxx::TOKENKEY
+
+# 2. Grant read-only access to ONLY the vault(s) this project needs
+pass-cli pat access grant --pat-name "sandcat" --vault-name "MyVault" --role viewer
+# Or restrict to a single item:
+# pass-cli pat access grant --pat-name "sandcat" --vault-name "MyVault" --item-title "Anthropic Key" --role viewer
+
+# 3. Add the pst_... token to ~/.config/sandcat/settings.json
+```
+
+```json
+{
+  "proton_pass_token": "pst_xxxx...xxxx::TOKENKEY",
+  "secrets": {
+    "GITHUB_TOKEN": {
+      "pass": "pass://MyVault/GitHub Token/credential",
+      "hosts": ["github.com", "*.github.com", "*.githubusercontent.com"]
+    }
+  }
+}
+```
+
+At startup, sandcat logs into `pass-cli` using the PAT and verifies the session is scoped (not a full account credential). If a full account credential is detected, mitmproxy refuses to start with a security error.
+
+> **Note:** This check is fail-closed and applies only when at least one `pass://` secret is configured. A misconfigured or non-scoped Proton Pass token prevents the mitmproxy proxy from starting **at all** — so `op://` secrets, plain-value secrets, and network policy will also be unavailable until the token is fixed. If the proxy fails to come up after adding a `pass://` secret, check the mitmproxy logs for the PAT security error rather than assuming a broader outage.
+
+##### Building the `mitmproxy-pass` image locally
+
+The published image (`ghcr.io/virtuslab/sandcat-mitmproxy-pass`) is built in CI, but you can build it locally. The pinned `pass-cli` version and per-arch checksums live in a single source of truth, [`images/mitmproxy-pass/pass-cli.env`](../images/mitmproxy-pass/pass-cli.env), and must be passed in as build args (the Dockerfile has no defaults on purpose):
+
+```bash
+set -a; . images/mitmproxy-pass/pass-cli.env; set +a
+docker build \
+  --build-arg PASS_CLI_VERSION \
+  --build-arg PASS_CLI_SHA256_X86_64 \
+  --build-arg PASS_CLI_SHA256_AARCH64 \
+  -t sandcat-mitmproxy-pass:local \
+  images/mitmproxy-pass
+```
+
+PAT detection relies on the wording of `pass-cli info` output. Because the binary is pinned by version **and** sha256, that output cannot change without a deliberate bump. A contract test (`TestPassCliPatContract`) locks the detection regex against golden samples tagged with `PASS_CLI_VERSION`. When you bump `pass-cli.env`, you must also re-capture those samples — see [`cli/test/mitmproxy/fixtures/pass-cli/README.md`](test/mitmproxy/fixtures/pass-cli/README.md) — or CI will fail.
 
 Note: Cursor agent support currently uses compatibility defaults for auth/network
 settings while provider-specific hardening is being expanded.
@@ -54,6 +107,8 @@ Options:
 - `--ide` - The IDE name (e.g., `vscode`, `jetbrains`, `none`) (optional)
 - `--stacks` - Space-separated development stacks (e.g., `"python java"`) (optional)
 - `--name` - Project name for Docker Compose (default: `{dir}-sandbox`)
+- `--secret-provider` - `none`, `1password`, or `protonpass` (optional; default `none`)
+- `--1password` - Deprecated alias for `--secret-provider 1password`
 
 #### `sandcat init settings`
 

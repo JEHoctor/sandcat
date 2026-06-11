@@ -70,19 +70,36 @@ customize_compose_file() {
 	sed '/^$/{ N; /^\n[[:space:]]/{ s/^\n//; }; }' "$compose_file" > "$compose_file.tmp" && mv "$compose_file.tmp" "$compose_file"
 }
 
-# Enables 1Password integration in the mitmproxy service.
-# Switches to the pre-built mitmproxy image that includes the op CLI,
-# and forwards OP_SERVICE_ACCOUNT_TOKEN from the host environment.
+# Configures the mitmproxy image and secret-backend environment for compose-proxy.yml.
 # Args:
 #   $1 - Path to the compose-proxy.yml file
-enable_1password() {
+#   $2 - Secret provider: none | 1password | protonpass
+apply_secret_provider() {
 	require yq
 	local compose_file=$1
+	local provider=${2:-none}
 
-	yq -i '
-		.services.mitmproxy.image = "ghcr.io/virtuslab/sandcat-mitmproxy-op:latest" |
-		.services.mitmproxy.environment = ["OP_SERVICE_ACCOUNT_TOKEN"]
-	' "$compose_file"
+	case "$provider" in
+	none)
+		return 0
+		;;
+	1password)
+		yq -i '
+			.services.mitmproxy.image = "ghcr.io/virtuslab/sandcat-mitmproxy-op:latest" |
+			.services.mitmproxy.environment = ["OP_SERVICE_ACCOUNT_TOKEN"]
+		' "$compose_file"
+		;;
+	protonpass)
+		yq -i '
+			.services.mitmproxy.image = "ghcr.io/virtuslab/sandcat-mitmproxy-pass:latest" |
+			.services.mitmproxy.environment = ["PROTON_PASS_PERSONAL_ACCESS_TOKEN"]
+		' "$compose_file"
+		;;
+	*)
+		echo "Unknown secret provider: $provider" >&2
+		return 1
+		;;
+	esac
 }
 
 # Switches the mitmproxy service from web UI to console (mitmdump) mode.

@@ -5,7 +5,7 @@ Provides a base ``SandcatAddon`` class that agent-specific addons subclass.
 The base implements all behavior that is identical across agents:
 
   - Settings layer loading and merging (user / project / local).
-  - 1Password (``op://``) reference resolution.
+  - 1Password (``op://``) and Proton Pass (``pass://``) reference resolution.
   - Network policy evaluation (top-to-bottom, first match wins, default deny).
   - Secret substitution in URL, headers, optional Basic Auth, and body.
   - ``sandcat.env`` file generation that exports placeholders for the agent.
@@ -24,6 +24,19 @@ Agent variants override a small set of hook methods to customise behaviour:
 
 The defaults are tuned to match the simplest "Claude" behaviour (no streaming,
 no Basic Auth handling, body substitution always permitted).
+
+Proton Pass authentication
+--------------------------
+``pass://`` secrets require a Personal Access Token (PAT), **not** a full
+Proton account credential.  A PAT is created with ``pass-cli pat create``
+and scoped to specific vaults/items via ``pass-cli pat access grant``.
+A PAT starts with zero access by default, which limits the blast radius if
+the token is ever compromised.
+
+Using a full account credential is rejected: after ``pass-cli login`` the
+addon runs ``pass-cli info`` and checks for ``"Personal Access Token"`` in
+the output.  If instead a user e-mail is shown the session is wiped with
+``pass-cli logout`` and the addon load fails, refusing to start mitmproxy.
 """
 
 import base64
@@ -57,6 +70,22 @@ SANDCAT_DNS_CONF_PATH = "/home/mitmproxy/.mitmproxy/dns.conf"
 logger = logging.getLogger(__name__)
 
 
+# PAT sessions print a `Personal Access Token: <name>` field; full accounts
+# print `ID`/`Username`/`Email` instead. Anchor to a line-start label (optional
+# leading `- ` and a trailing colon) so a full-account *value* that happens to
+# contain the phrase (e.g. a username "personal access token") can't be mistaken
+# for a PAT. Casing/spacing-tolerant; format drift is caught by the golden
+# contract test (see cli/test/mitmproxy/fixtures/pass-cli/).
+_PAT_SESSION_MARKER = re.compile(
+    r"^\s*-?\s*personal\s+access\s+token\s*:", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _pass_cli_session_is_pat(stdout: str) -> bool:
+    """Return True when ``pass-cli info`` output indicates a PAT session."""
+    return bool(_PAT_SESSION_MARKER.search(stdout or ""))
+
+
 class SandcatAddon:
     """Base sandcat addon: network policy + secret substitution."""
 
@@ -66,6 +95,7 @@ class SandcatAddon:
         self.env: dict[str, str] = {}  # non-secret env vars (e.g. git identity)
         self.dns_servers: list[str] = []  # custom upstream DNS for wg-client
         self.debug_enabled = False  # subclasses may flip this in _on_settings_merged
+        self._pass_cli_logged_in = False  # True only after a successful pass-cli login
 
     # ------------------------------------------------------------------ load
 
@@ -88,6 +118,13 @@ class SandcatAddon:
         self._on_settings_merged(merged)
 
         self._configure_op_token(merged.get("op_service_account_token"))
+        self._configure_proton_pass_token(merged.get("proton_pass_token"))
+
+        has_pass_secrets = any("pass" in e for e in merged["secrets"].values())
+        self._pass_cli_logged_in = self._pass_cli_login_if_needed(has_pass_secrets)
+        if has_pass_secrets and self._pass_cli_logged_in:
+            self._verify_pat_auth_or_die()
+
         self.env = merged["env"]
         self._load_secrets(merged["secrets"])
         self._load_network_rules(merged["network"])
@@ -107,8 +144,141 @@ class SandcatAddon:
     @staticmethod
     def _configure_op_token(token: str | None):
         """Set OP_SERVICE_ACCOUNT_TOKEN from settings if not already in the environment."""
-        if token and "OP_SERVICE_ACCOUNT_TOKEN" not in os.environ:
+        if "OP_SERVICE_ACCOUNT_TOKEN" in os.environ:
+            ctx.log.info(
+                "op_service_account_token: using existing OP_SERVICE_ACCOUNT_TOKEN "
+                "from environment (settings value, if any, ignored)"
+            )
+        elif token:
             os.environ["OP_SERVICE_ACCOUNT_TOKEN"] = token
+            ctx.log.info(
+                f"op_service_account_token: applied from settings (len={len(token)})"
+            )
+        else:
+            ctx.log.info("op_service_account_token: not configured")
+
+    @staticmethod
+    def _configure_proton_pass_token(token: str | None):
+        """Set PROTON_PASS_PERSONAL_ACCESS_TOKEN from settings if not already in the environment.
+
+        The value must be a Proton Pass Personal Access Token (PAT) created with
+        ``pass-cli pat create``.  Full account credentials are rejected at login
+        time by ``_verify_pat_auth_or_die``.
+        """
+        if "PROTON_PASS_PERSONAL_ACCESS_TOKEN" in os.environ:
+            ctx.log.info(
+                "proton_pass_token: using existing PROTON_PASS_PERSONAL_ACCESS_TOKEN "
+                "from environment (settings value, if any, ignored)"
+            )
+        elif token:
+            os.environ["PROTON_PASS_PERSONAL_ACCESS_TOKEN"] = token
+            ctx.log.info(
+                f"proton_pass_token: applied from settings (len={len(token)})"
+            )
+        else:
+            ctx.log.info("proton_pass_token: not configured")
+
+    def _pass_cli_login_if_needed(self, has_pass_secrets: bool) -> bool:
+        """Attempt ``pass-cli login`` when at least one ``pass://`` secret is present.
+
+        ``has_pass_secrets`` is computed once by the caller (``load``) from the
+        merged secrets.  Returns ``True`` if login succeeded or there are no
+        ``pass://`` secrets (login not needed).  Returns ``False`` if login
+        failed for any reason — callers should treat all ``pass://`` secrets as
+        unresolvable.
+        """
+        if not has_pass_secrets:
+            return True  # no pass:// secrets — login not needed
+
+        if not os.environ.get("PROTON_PASS_PERSONAL_ACCESS_TOKEN"):
+            ctx.log.warn(
+                "PROTON_PASS_PERSONAL_ACCESS_TOKEN not set; "
+                "all pass:// secrets will be skipped"
+            )
+            return False
+
+        try:
+            result = subprocess.run(
+                ["pass-cli", "login"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            ctx.log.warn(
+                "pass-cli not found in PATH; "
+                "ensure the sandcat-mitmproxy-pass image is in use"
+            )
+            return False
+
+        if result.returncode != 0:
+            ctx.log.warn(
+                f"pass-cli login failed (exit {result.returncode}); "
+                "check PROTON_PASS_PERSONAL_ACCESS_TOKEN"
+            )
+            return False
+
+        ctx.log.info("pass-cli login: succeeded")
+        return True
+
+    def _verify_pat_auth_or_die(self):
+        """Confirm the active session is a PAT, not a full account credential.
+
+        Runs ``pass-cli info`` and checks for a Personal Access Token session
+        marker (case- and whitespace-insensitive).  Two distinct failure modes,
+        both fail-closed (logout + raise, preventing mitmproxy from starting):
+
+        - ``pass-cli info`` exits non-zero — the session could not be verified
+          (auth failed / session expired).  Reported as an auth error.
+        - the session is valid but shows no PAT marker — a full account
+          credential.  Reported as a security error.
+
+        This check is only called when at least one ``pass://`` secret exists,
+        so op-only or value-only projects are unaffected.
+        """
+        try:
+            info = subprocess.run(
+                ["pass-cli", "info"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                "pass-cli not found while verifying PAT authentication"
+            ) from None
+
+        if info.returncode != 0:
+            self._pass_cli_logout()
+            msg = (
+                f"pass-cli could not verify the Proton Pass session "
+                f"(`pass-cli info` exited {info.returncode}). The token is "
+                "invalid or the session expired; check "
+                "PROTON_PASS_PERSONAL_ACCESS_TOKEN. This is an authentication "
+                "failure, not necessarily a full-account credential."
+            )
+            ctx.log.error(msg)
+            raise RuntimeError(msg)
+
+        if not _pass_cli_session_is_pat(info.stdout):
+            self._pass_cli_logout()
+            msg = (
+                "SECURITY: proton_pass_token does not authenticate as a Proton Pass "
+                "Personal Access Token. Using a full account credential would give "
+                "this mitmproxy container access to every vault on your account. "
+                "Create a scoped PAT with `pass-cli pat create` and grant it "
+                "read-only access to only the vaults/items this project needs with "
+                "`pass-cli pat access grant --role viewer`. "
+                "See https://protonpass.github.io/pass-cli/commands/personal-access-token/"
+            )
+            ctx.log.error(msg)
+            raise RuntimeError(msg)
+
+        ctx.log.info("pass-cli info: confirmed Personal Access Token (PAT) session")
+
+    @staticmethod
+    def _pass_cli_logout():
+        """Wipe the active pass-cli session (best-effort)."""
+        subprocess.run(
+            ["pass-cli", "logout"],
+            capture_output=True, text=True, timeout=10,
+        )
 
     @staticmethod
     def _merge_settings(layers: list[dict]) -> dict:
@@ -119,12 +289,16 @@ class SandcatAddon:
         - network: concatenated, highest precedence first (top-to-bottom matching).
         - op_service_account_token: highest precedence non-empty value wins.
         - dns_servers: highest-precedence layer that sets the key wins (last-wins).
+        - proton_pass_token: highest precedence non-empty value wins.
+          Must be a Proton Pass Personal Access Token (PAT); full account
+          credentials are rejected at startup by ``_verify_pat_auth_or_die``.
         """
         env: dict[str, str] = {}
         secrets: dict[str, dict] = {}
         network: list[dict] = []
         op_token: str | None = None
         dns_servers = None
+        proton_pass_token: str | None = None
 
         for layer in layers:
             env.update(layer.get("env", {}))
@@ -134,6 +308,9 @@ class SandcatAddon:
                 op_token = layer_token
             if "dns_servers" in layer:
                 dns_servers = layer["dns_servers"]
+            layer_proton_pass_token = layer.get("proton_pass_token")
+            if layer_proton_pass_token:
+                proton_pass_token = layer_proton_pass_token
 
         # Network rules: highest-precedence layer's rules come first.
         for layer in reversed(layers):
@@ -145,6 +322,7 @@ class SandcatAddon:
             "network": network,
             "op_service_account_token": op_token,
             "dns_servers": dns_servers,
+            "proton_pass_token": proton_pass_token,
         }
 
     # --------------------------------------------------------------- secrets
@@ -152,57 +330,129 @@ class SandcatAddon:
     def _load_secrets(self, raw_secrets: dict):
         for name, entry in raw_secrets.items():
             placeholder = f"SANDCAT_PLACEHOLDER_{name}"
-            try:
-                value = self._resolve_secret_value(name, entry)
-            except (RuntimeError, ValueError) as e:
-                ctx.log.warn(str(e))
-                print(f"WARNING: {e}", file=sys.stderr)
+            self._warn_if_value_looks_like_reference(name, entry)
+            source = self._secret_source(entry)
+            if "pass" in entry and not self._pass_cli_logged_in:
+                msg = (
+                    f"Secret {name!r}: pass-cli login did not succeed; "
+                    "skipping pass:// resolution"
+                )
+                ctx.log.warn(msg)
+                print(f"WARNING: {msg}", file=sys.stderr)
                 value = ""
+            else:
+                try:
+                    value = self._resolve_secret_value(name, entry)
+                except (RuntimeError, ValueError) as e:
+                    ctx.log.warn(str(e))
+                    print(f"WARNING: {e}", file=sys.stderr)
+                    value = ""
+            normalized = self._normalize_secret_value(value)
             self.secrets[name] = {
-                "value": self._normalize_secret_value(value),
+                "value": normalized,
                 "hosts": entry.get("hosts", []),
                 "placeholder": placeholder,
             }
+            ctx.log.info(
+                f"Secret {name!r}: source={source} resolved_len={len(normalized)} "
+                f"hosts={len(entry.get('hosts', []))}"
+            )
+
+    @staticmethod
+    def _secret_source(entry: dict) -> str:
+        """Return the secret entry's source key for logging (value/op/pass/invalid)."""
+        keys = [k for k in ("value", "op", "pass") if k in entry]
+        if len(keys) == 1:
+            return keys[0]
+        if not keys:
+            return "invalid(missing)"
+        return f"invalid(multiple:{'+'.join(keys)})"
+
+    @staticmethod
+    def _warn_if_value_looks_like_reference(name: str, entry: dict):
+        """Detect the common misconfiguration of putting an ``op://`` or
+        ``pass://`` reference under the literal ``value`` field.
+
+        Without this check, the literal reference string is injected verbatim
+        as the secret (e.g., ``Authorization: Bearer pass://Vault/Item/secret``)
+        with no upstream lookup, which is almost never what the user intended.
+        """
+        raw = entry.get("value")
+        if not isinstance(raw, str):
+            return
+        stripped = raw.strip()
+        for scheme, correct_key in (("op://", "op"), ("pass://", "pass")):
+            if stripped.startswith(scheme):
+                msg = (
+                    f"Secret {name!r}: 'value' field starts with {scheme!r}, "
+                    f"which looks like a reference. To resolve it, move the "
+                    f"reference under the {correct_key!r} key instead of "
+                    f"'value' (e.g., \"{correct_key}\": \"{stripped}\"). "
+                    f"As written, the literal string will be injected verbatim "
+                    f"and no upstream lookup will happen."
+                )
+                ctx.log.warn(msg)
+                print(f"WARNING: {msg}", file=sys.stderr)
+                return
 
     @classmethod
     def _resolve_secret_value(cls, name: str, entry: dict) -> str:
-        """Resolve a secret from either a plain ``value`` or a 1Password ``op`` reference."""
+        """Resolve a secret from a plain ``value``, 1Password ``op://``, or Proton Pass ``pass://`` reference."""
         has_value = "value" in entry
         has_op = "op" in entry
+        has_pass = "pass" in entry
 
-        if has_value and has_op:
+        provided = [has_value, has_op, has_pass]
+        if sum(provided) != 1:
             raise ValueError(
-                f"Secret {name!r}: specify either 'value' or 'op', not both"
-            )
-        if not has_value and not has_op:
-            raise ValueError(
-                f"Secret {name!r}: must specify either 'value' or 'op'"
+                f"Secret {name!r}: specify exactly one of 'value', 'op', or 'pass'"
             )
 
         if has_value:
             return cls._normalize_secret_value(entry["value"])
 
-        op_ref = entry["op"]
-        if not op_ref.startswith("op://"):
-            raise ValueError(
-                f"Secret {name!r}: 'op' value must start with 'op://', got {op_ref!r}"
-            )
+        if has_op:
+            op_ref = entry["op"]
+            if not op_ref.startswith("op://"):
+                raise ValueError(
+                    f"Secret {name!r}: 'op' value must start with 'op://', got {op_ref!r}"
+                )
 
+            try:
+                result = subprocess.run(
+                    ["op", "read", op_ref],
+                    capture_output=True, text=True, timeout=30,
+                )
+            except FileNotFoundError:
+                raise RuntimeError(
+                    f"Secret {name!r}: 'op' CLI not found. "
+                    "Install 1Password CLI to use op:// references."
+                ) from None
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                raise RuntimeError(f"Secret {name!r}: 'op read' failed: {stderr}")
+
+            return cls._normalize_secret_value(result.stdout.strip())
+
+        pass_ref = entry["pass"]
+        if not pass_ref.startswith("pass://"):
+            raise ValueError(
+                f"Secret {name!r}: 'pass' value must start with 'pass://', got {pass_ref!r}"
+            )
         try:
             result = subprocess.run(
-                ["op", "read", op_ref],
+                ["pass-cli", "item", "view", pass_ref],
                 capture_output=True, text=True, timeout=30,
             )
         except FileNotFoundError:
             raise RuntimeError(
-                f"Secret {name!r}: 'op' CLI not found. "
-                "Install 1Password CLI to use op:// references."
+                f"Secret {name!r}: 'pass-cli' not found. Install Proton Pass CLI to use pass:// references."
             ) from None
-
         if result.returncode != 0:
-            stderr = result.stderr.strip()
-            raise RuntimeError(f"Secret {name!r}: 'op read' failed: {stderr}")
-
+            raise RuntimeError(
+                f"Secret {name!r}: 'pass-cli' read failed: {result.stderr.strip()}"
+            )
         return cls._normalize_secret_value(result.stdout.strip())
 
     @staticmethod
@@ -376,7 +626,11 @@ class SandcatAddon:
 
     def _debug(self, message: str):
         if self.debug_enabled:
-            ctx.log.info(f"[sandcat-debug] {message}")
+            msg = f"[sandcat-debug] {message}"
+            ctx.log.info(msg)
+            # Mirror warnings: ctx.log.info alone is often invisible in mitmweb
+            # Docker logs (buffering / termlog routing to the web UI).
+            print(msg, file=sys.stderr)
 
     @staticmethod
     def _is_truthy(value) -> bool:

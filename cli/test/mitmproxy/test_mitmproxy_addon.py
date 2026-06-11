@@ -14,6 +14,7 @@ This file covers:
 import importlib
 import json
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -1039,13 +1040,49 @@ class TestOpSecretResolution:
 
     def test_both_value_and_op_raises(self, addon_cls):
         entry = {"value": "x", "op": "op://vault/item/field", "hosts": []}
-        with pytest.raises(ValueError, match="either 'value' or 'op'"):
+        with pytest.raises(ValueError, match="exactly one of 'value', 'op', or 'pass'"):
+            addon_cls._resolve_secret_value("KEY", entry)
+
+    def test_both_op_and_pass_raises(self, addon_cls):
+        entry = {"op": "op://vault/item/field", "pass": "pass://vault/item/field", "hosts": []}
+        with pytest.raises(ValueError, match="exactly one of 'value', 'op', or 'pass'"):
             addon_cls._resolve_secret_value("KEY", entry)
 
     def test_neither_value_nor_op_raises(self, addon_cls):
         entry = {"hosts": ["example.com"]}
-        with pytest.raises(ValueError, match="must specify either"):
+        with pytest.raises(ValueError, match="exactly one of 'value', 'op', or 'pass'"):
             addon_cls._resolve_secret_value("KEY", entry)
+
+    def test_pass_reference_resolved_via_subprocess(self, addon_cls):
+        entry = {"pass": "pass://vault/item/field", "hosts": ["api.example.com"]}
+        with patch(f"{_COMMON}.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="secret-value\n", stderr="")
+            value = addon_cls._resolve_secret_value("KEY", entry)
+        assert value == "secret-value"
+        mock_run.assert_called_once_with(
+            ["pass-cli", "item", "view", "pass://vault/item/field"],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_pass_without_prefix_raises(self, addon_cls):
+        entry = {"pass": "vault/item/field", "hosts": []}
+        with pytest.raises(ValueError, match="must start with 'pass://'"):
+            addon_cls._resolve_secret_value("KEY", entry)
+
+    def test_pass_cli_not_found_raises(self, addon_cls):
+        entry = {"pass": "pass://vault/item/field", "hosts": []}
+        with patch(f"{_COMMON}.subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(RuntimeError, match="'pass-cli' not found"):
+                addon_cls._resolve_secret_value("KEY", entry)
+
+    def test_pass_cli_failure_raises(self, addon_cls):
+        entry = {"pass": "pass://vault/item/field", "hosts": []}
+        with patch(f"{_COMMON}.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="", stderr="unauthorized"
+            )
+            with pytest.raises(RuntimeError, match="'pass-cli' read failed"):
+                addon_cls._resolve_secret_value("KEY", entry)
 
     def test_op_without_prefix_raises(self, addon_cls):
         entry = {"op": "vault/item/field", "hosts": []}
@@ -1134,6 +1171,580 @@ class TestOpSecretResolution:
         addon_cls._configure_op_token(None)
         assert "OP_SERVICE_ACCOUNT_TOKEN" not in os.environ
 
+    def test_proton_pass_token_from_settings(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+        settings = {
+            "proton_pass_token": "pst_test_token",
+            "secrets": {"KEY": {"pass": "pass://vault/item/field", "hosts": []}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                return MagicMock(returncode=0, stdout="Personal Access Token: pst_test_token\n", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "item" and cmd[2] == "view":
+                return MagicMock(returncode=0, stdout="secret\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())
+        assert os.environ.get("PROTON_PASS_PERSONAL_ACCESS_TOKEN") == "pst_test_token"
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+
+    def test_proton_pass_token_env_var_takes_precedence(self, addon_cls, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "from_env")
+        addon_cls._configure_proton_pass_token("from_settings")
+        assert os.environ["PROTON_PASS_PERSONAL_ACCESS_TOKEN"] == "from_env"
+
+    def test_pass_login_called_once_on_load_with_pass_secrets(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test")
+        settings = {
+            "secrets": {
+                "A": {"pass": "pass://vault/item/a", "hosts": ["a.com"]},
+                "B": {"pass": "pass://vault/item/b", "hosts": ["b.com"]},
+            }
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+        login_calls = []
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                login_calls.append(True)
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                return MagicMock(returncode=0, stdout="Personal Access Token: test\n", stderr="")
+            return MagicMock(returncode=0, stdout="secret\n", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())
+
+        assert len(login_calls) == 1, "pass-cli login must be called exactly once"
+
+    def test_pass_login_skipped_when_no_pass_secrets(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test")
+        settings = {
+            "secrets": {"KEY": {"value": "plain", "hosts": ["a.com"]}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+        login_calls = []
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                login_calls.append(True)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())
+
+        assert login_calls == [], "pass-cli login must not be called when there are no pass:// secrets"
+
+    def test_pass_login_failure_all_pass_secrets_empty(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test")
+        settings = {
+            "secrets": {
+                "BAD": {"pass": "pass://vault/item/field", "hosts": []},
+                "GOOD": {"value": "plain", "hosts": []},
+            }
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                return MagicMock(returncode=1, stdout="", stderr="authentication failed")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())
+
+        assert addon.secrets["BAD"]["value"] == "", "pass:// secret must be empty when login failed"
+        assert addon.secrets["GOOD"]["value"] == "plain", "value secret must still resolve when pass login failed"
+
+    def test_pat_verification_passes_for_pat_session(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test")
+        settings = {
+            "secrets": {"KEY": {"pass": "pass://vault/item/field", "hosts": ["a.com"]}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                return MagicMock(returncode=0, stdout="Personal Access Token: sandcat\n", stderr="")
+            return MagicMock(returncode=0, stdout="resolved\n", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())  # must not raise
+
+        assert addon.secrets["KEY"]["value"] == "resolved"
+
+    def test_pat_verification_hard_blocks_user_account_session(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "account-password")
+        settings = {
+            "secrets": {"KEY": {"pass": "pass://vault/item/field", "hosts": []}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+        logout_calls = []
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                # Simulates a full account session — no PAT indicator
+                return MagicMock(returncode=0, stdout="Logged in as: user@example.com\n", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "logout":
+                logout_calls.append(True)
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            with pytest.raises(RuntimeError, match="SECURITY"):
+                addon.load(MagicMock())
+
+        assert len(logout_calls) == 1, "pass-cli logout must be called once to wipe the non-PAT session"
+
+    def test_pat_verification_reports_auth_failure_distinctly(self, addon_cls, tmp_path, monkeypatch):
+        # `pass-cli info` exiting non-zero means the session could not be
+        # verified (bad/expired token) — NOT a full-account credential. The
+        # error must say so rather than firing the misleading SECURITY message.
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_expired")
+        settings = {
+            "secrets": {"KEY": {"pass": "pass://vault/item/field", "hosts": []}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+        logout_calls = []
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                return MagicMock(returncode=1, stdout="", stderr="session expired")
+            if cmd[0] == "pass-cli" and cmd[1] == "logout":
+                logout_calls.append(True)
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            with pytest.raises(RuntimeError) as excinfo:
+                addon.load(MagicMock())
+
+        msg = str(excinfo.value)
+        assert "could not verify" in msg, "auth-failure error must explain the session could not be verified"
+        assert "SECURITY" not in msg, "auth failure must not masquerade as a full-account security error"
+        assert len(logout_calls) == 1, "pass-cli logout must wipe the unverifiable session"
+
+    def test_pat_verification_skipped_when_no_pass_secrets(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "anything")
+        settings = {
+            "secrets": {"KEY": {"op": "op://vault/item/field", "hosts": ["a.com"]}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+        info_calls = []
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                info_calls.append(True)
+            if cmd[0] == "op":
+                return MagicMock(returncode=0, stdout="resolved\n", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())
+
+        assert info_calls == [], "pass-cli info must not be called when there are no pass:// secrets"
+
+
+class TestPassCliPatSessionDetection:
+    """Unit tests for PAT session detection from pass-cli info output."""
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "Personal Access Token: sandcat\n",
+            "PERSONAL ACCESS TOKEN: pst_test\n",
+            "personal access token: pst_test\n",
+            "Personal\tAccess\tToken: sandcat\n",
+            # Real output shape: leading "- " and surrounding whitespace.
+            "- Release track: stable\n- Personal Access Token: sandcat\n",
+            "-   personal access token  :  sandcat\n",
+        ],
+    )
+    def test_pass_cli_session_is_pat_accepts_varied_casing_and_spacing(self, stdout):
+        assert common._pass_cli_session_is_pat(stdout) is True
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "",
+            "Logged in as: user@example.com\n",
+            "- Email: user@proton.me\n- Username: alice\n",
+            "Release track: stable\nID: abc\n",
+            # Hardening: the phrase appearing inside a field *value* (not as a
+            # line-start label) must NOT be read as a PAT session.
+            "- Username: personal access token\n- Email: a@b.com\n",
+            "- Username: personal access token: foo\n",
+        ],
+    )
+    def test_pass_cli_session_is_pat_rejects_account_session_output(self, stdout):
+        assert common._pass_cli_session_is_pat(stdout) is False
+
+    @pytest.mark.parametrize("addon_cls", ADDONS)
+    def test_pat_verification_accepts_odd_casing_info_output(self, addon_cls, tmp_path, monkeypatch):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test")
+        settings = {
+            "secrets": {"KEY": {"pass": "pass://vault/item/field", "hosts": []}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        def mock_run_side_effect(cmd, **kwargs):
+            if cmd[0] == "pass-cli" and cmd[1] == "login":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[0] == "pass-cli" and cmd[1] == "info":
+                return MagicMock(
+                    returncode=0,
+                    stdout="PERSONAL\tACCESS\tTOKEN: sandcat\n",
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="resolved\n", stderr="")
+
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run_side_effect):
+            addon.load(MagicMock())
+
+        assert addon.secrets["KEY"]["value"] == "resolved"
+
+
+# ---------------------------------------------------------------------------
+# pass-cli PAT-detection contract — bump-gated against the pinned version.
+#
+# pass-cli is pinned by version + per-arch sha256 in
+# images/mitmproxy-pass/pass-cli.env, so its `pass-cli info` output cannot drift
+# under us without a deliberate bump. These tests lock the regex against golden
+# samples of that output and fail if the pin is bumped without re-capturing the
+# goldens (see cli/test/mitmproxy/fixtures/pass-cli/README.md).
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_PASS_CLI_ENV = _REPO_ROOT / "images" / "mitmproxy-pass" / "pass-cli.env"
+_PASS_CLI_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "pass-cli"
+
+
+def _read_env_file(path: Path) -> dict:
+    """Parse a simple KEY=value .env file (ignores comments and blank lines)."""
+    out = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            out[key.strip()] = value.strip()
+    return out
+
+
+class TestPassCliPatContract:
+    """Locks the PAT-detection heuristic against the pinned pass-cli output."""
+
+    def test_pinned_env_has_version_and_checksums(self):
+        env = _read_env_file(_PASS_CLI_ENV)
+        assert env.get("PASS_CLI_VERSION"), "PASS_CLI_VERSION missing from pass-cli.env"
+        for arch in ("PASS_CLI_SHA256_X86_64", "PASS_CLI_SHA256_AARCH64"):
+            assert re.fullmatch(r"[0-9a-f]{64}", env.get(arch, "")), (
+                f"{arch} must be a 64-char sha256 hex digest"
+            )
+
+    def test_goldens_were_captured_against_pinned_version(self):
+        env = _read_env_file(_PASS_CLI_ENV)
+        golden_version = (_PASS_CLI_FIXTURES / "VERSION").read_text().strip()
+        assert golden_version == env["PASS_CLI_VERSION"], (
+            "pass-cli was bumped without re-capturing the golden `pass-cli info` "
+            "samples. See cli/test/mitmproxy/fixtures/pass-cli/README.md."
+        )
+
+    def test_pat_session_golden_is_detected_as_pat(self):
+        pat_output = (_PASS_CLI_FIXTURES / "info_pat.txt").read_text()
+        assert common._pass_cli_session_is_pat(pat_output) is True, (
+            "PAT-session `pass-cli info` golden no longer matches the detection "
+            "regex — upstream wording likely changed; update _PAT_SESSION_MARKER."
+        )
+
+    def test_full_account_golden_is_rejected(self):
+        account_output = (_PASS_CLI_FIXTURES / "info_full_account.txt").read_text()
+        assert common._pass_cli_session_is_pat(account_output) is False, (
+            "Full-account `pass-cli info` golden now matches the PAT detection "
+            "regex — the security guarantee is broken; tighten _PAT_SESSION_MARKER."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Startup diagnostics — warnings and per-secret summaries that help users
+# spot misconfigurations such as putting a ``pass://`` reference under the
+# ``value`` field instead of the ``pass`` field.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("addon_cls", ADDONS)
+class TestStartupDiagnostics:
+    """Locks in the diagnostic logging emitted at addon load time."""
+
+    def test_secret_source_helper_identifies_known_sources(self, addon_cls):
+        assert addon_cls._secret_source({"value": "x"}) == "value"
+        assert addon_cls._secret_source({"op": "op://a/b/c"}) == "op"
+        assert addon_cls._secret_source({"pass": "pass://a/b/c"}) == "pass"
+
+    def test_secret_source_helper_flags_invalid_entries(self, addon_cls):
+        assert addon_cls._secret_source({}) == "invalid(missing)"
+        assert "invalid(multiple:" in addon_cls._secret_source(
+            {"value": "x", "pass": "pass://a/b/c"}
+        )
+
+    def test_value_field_with_pass_reference_emits_warning(
+        self, addon_cls, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+        settings = {
+            "secrets": {
+                "API_KEY": {
+                    "value": "pass://Vault/Item/secret",
+                    "hosts": ["api.example.com"],
+                },
+            },
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        log = MagicMock()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.ctx.log", log):
+            addon.load(MagicMock())
+
+        warn_msgs = [c.args[0] for c in log.warn.call_args_list]
+        assert any(
+            "'value' field starts with 'pass://'" in m
+            and "API_KEY" in m
+            and '"pass":' in m
+            for m in warn_msgs
+        ), f"expected pass:// misuse warning, got: {warn_msgs}"
+
+    def test_value_field_with_op_reference_emits_warning(
+        self, addon_cls, tmp_path
+    ):
+        settings = {
+            "secrets": {
+                "API_KEY": {"value": "op://Vault/Item/field", "hosts": []},
+            },
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        log = MagicMock()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.ctx.log", log):
+            addon.load(MagicMock())
+
+        warn_msgs = [c.args[0] for c in log.warn.call_args_list]
+        assert any(
+            "'value' field starts with 'op://'" in m and '"op":' in m
+            for m in warn_msgs
+        ), f"expected op:// misuse warning, got: {warn_msgs}"
+
+    def test_plain_value_does_not_emit_misuse_warning(
+        self, addon_cls, tmp_path
+    ):
+        settings = {
+            "secrets": {"API_KEY": {"value": "plain-secret", "hosts": []}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        log = MagicMock()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.ctx.log", log):
+            addon.load(MagicMock())
+
+        warn_msgs = [c.args[0] for c in log.warn.call_args_list]
+        assert not any("'value' field starts with" in m for m in warn_msgs), \
+            f"unexpected misuse warning: {warn_msgs}"
+
+    def test_per_secret_summary_includes_source_and_length(
+        self, addon_cls, tmp_path
+    ):
+        settings = {
+            "secrets": {
+                "PLAIN": {"value": "abcdef", "hosts": ["a.com", "b.com"]},
+            },
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        log = MagicMock()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.ctx.log", log):
+            addon.load(MagicMock())
+
+        info_msgs = [c.args[0] for c in log.info.call_args_list]
+        assert any(
+            "Secret 'PLAIN':" in m and "source=value" in m
+            and "resolved_len=6" in m and "hosts=2" in m
+            for m in info_msgs
+        ), f"expected per-secret summary, got: {info_msgs}"
+
+    def test_per_secret_summary_does_not_leak_value(
+        self, addon_cls, tmp_path
+    ):
+        settings = {
+            "secrets": {
+                "PLAIN": {"value": "super-secret-shibboleth", "hosts": []},
+            },
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        log = MagicMock()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.ctx.log", log):
+            addon.load(MagicMock())
+
+        all_msgs = (
+            [c.args[0] for c in log.info.call_args_list]
+            + [c.args[0] for c in log.warn.call_args_list]
+        )
+        assert not any("shibboleth" in m for m in all_msgs), \
+            f"secret value leaked into logs: {all_msgs}"
+
+    def test_proton_pass_token_applied_from_settings_logged(
+        self, addon_cls, monkeypatch
+    ):
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+        log = MagicMock()
+        with patch(f"{_COMMON}.ctx.log", log):
+            addon_cls._configure_proton_pass_token("pst_abc")
+        info_msgs = [c.args[0] for c in log.info.call_args_list]
+        assert any(
+            "proton_pass_token: applied from settings" in m and "len=7" in m
+            for m in info_msgs
+        ), f"expected applied log, got: {info_msgs}"
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+
+    def test_proton_pass_token_env_precedence_logged(
+        self, addon_cls, monkeypatch
+    ):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "from_env")
+        log = MagicMock()
+        with patch(f"{_COMMON}.ctx.log", log):
+            addon_cls._configure_proton_pass_token("from_settings")
+        info_msgs = [c.args[0] for c in log.info.call_args_list]
+        assert any(
+            "using existing PROTON_PASS_PERSONAL_ACCESS_TOKEN from environment"
+            in m for m in info_msgs
+        ), f"expected env-precedence log, got: {info_msgs}"
+
+    def test_proton_pass_token_missing_logged(self, addon_cls, monkeypatch):
+        monkeypatch.delenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", raising=False)
+        log = MagicMock()
+        with patch(f"{_COMMON}.ctx.log", log):
+            addon_cls._configure_proton_pass_token(None)
+        info_msgs = [c.args[0] for c in log.info.call_args_list]
+        assert any(
+            "proton_pass_token: not configured" in m for m in info_msgs
+        ), f"expected missing-token log, got: {info_msgs}"
+
+    def test_pass_cli_login_success_emits_info(
+        self, addon_cls, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PROTON_PASS_PERSONAL_ACCESS_TOKEN", "pst_test")
+        settings = {
+            "secrets": {"K": {"pass": "pass://v/i/f", "hosts": ["a.com"]}},
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = addon_cls()
+
+        def mock_run(cmd, **kwargs):
+            if cmd[:2] == ["pass-cli", "info"]:
+                return MagicMock(
+                    returncode=0,
+                    stdout="Personal Access Token: pst_test\n",
+                    stderr="",
+                )
+            return MagicMock(returncode=0, stdout="ok\n", stderr="")
+
+        log = MagicMock()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)), \
+             patch(f"{_COMMON}.subprocess.run", side_effect=mock_run), \
+             patch(f"{_COMMON}.ctx.log", log):
+            addon.load(MagicMock())
+
+        info_msgs = [c.args[0] for c in log.info.call_args_list]
+        assert any("pass-cli login: succeeded" in m for m in info_msgs), \
+            f"expected pass-cli login success log, got: {info_msgs}"
+        assert any(
+            "pass-cli info: confirmed Personal Access Token (PAT) session" in m
+            for m in info_msgs
+        ), f"expected PAT verification log, got: {info_msgs}"
+
 
 # ---------------------------------------------------------------------------
 # Settings merging — pure shared logic on the base class.
@@ -1188,6 +1799,7 @@ class TestSettingsMerging:
         assert merged["secrets"] == {}
         assert merged["network"] == [{"action": "allow", "host": "*"}]
         assert merged["op_service_account_token"] is None
+        assert merged["proton_pass_token"] is None
 
     def test_op_token_highest_precedence_wins(self):
         layers = [
@@ -1209,6 +1821,23 @@ class TestSettingsMerging:
         layers = [{"env": {"A": "1"}}]
         merged = BaseAddon._merge_settings(layers)
         assert merged["op_service_account_token"] is None
+        assert merged["proton_pass_token"] is None
+
+    def test_proton_pass_token_highest_precedence_wins(self):
+        layers = [
+            {"proton_pass_token": "user_pass"},
+            {"proton_pass_token": "project_pass"},
+        ]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["proton_pass_token"] == "project_pass"
+
+    def test_proton_pass_token_skips_empty(self):
+        layers = [
+            {"proton_pass_token": "user_pass"},
+            {"proton_pass_token": ""},
+        ]
+        merged = BaseAddon._merge_settings(layers)
+        assert merged["proton_pass_token"] == "user_pass"
 
     def test_empty_layers_list(self):
         merged = BaseAddon._merge_settings([])
@@ -1218,6 +1847,7 @@ class TestSettingsMerging:
             "network": [],
             "op_service_account_token": None,
             "dns_servers": None,
+            "proton_pass_token": None,
         }
 
     def test_dns_servers_highest_precedence_wins(self):
@@ -1431,6 +2061,43 @@ class TestCursorDebugFlag:
             addon.load(MagicMock())
         # Claude variant doesn't override _on_settings_merged → flag stays False.
         assert addon.debug_enabled is False
+
+    def test_debug_not_exported_to_sandcat_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SANDCAT_MITM_DEBUG", raising=False)
+        settings = {
+            "env": {"SANDCAT_MITM_DEBUG": "1", "GIT_USER_NAME": "dev"},
+            "network": [{"action": "allow", "host": "*"}],
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = CursorAddon()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)):
+            addon.load(MagicMock())
+        written = env_path.read_text()
+        assert "SANDCAT_MITM_DEBUG" not in written
+        assert 'export GIT_USER_NAME="dev"' in written
+
+    def test_debug_logs_to_stderr_on_request(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("SANDCAT_MITM_DEBUG", raising=False)
+        settings = {
+            "env": {"SANDCAT_MITM_DEBUG": "1"},
+            "network": [{"action": "allow", "host": "*"}],
+        }
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps(settings))
+        env_path = tmp_path / "sandcat.env"
+        addon = CursorAddon()
+        with patch(f"{_COMMON}.SETTINGS_PATHS", [str(p)]), \
+             patch(f"{_COMMON}.SANDCAT_ENV_PATH", str(env_path)):
+            addon.load(MagicMock())
+        capsys.readouterr()  # discard startup debug line
+        flow = _make_flow(host="api2.cursor.sh", url="https://api2.cursor.sh/health")
+        addon.request(flow)
+        err = capsys.readouterr().err
+        assert "[sandcat-debug]" in err
+        assert "api2.cursor.sh/health" in err
 
 
 # ---------------------------------------------------------------------------
