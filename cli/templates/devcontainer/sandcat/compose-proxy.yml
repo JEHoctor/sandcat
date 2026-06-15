@@ -68,6 +68,12 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+      # dns.conf is written only after the addon resolves every op:// secret,
+      # and sequential `op read` calls to 1Password can take ~30s. Without a
+      # start_period those early failures count toward retries and the proxy is
+      # wrongly marked unhealthy, so dependents fail to start. Failures during
+      # the start_period don't count; a single success ends it immediately.
+      start_period: 90s
 
 volumes:
   mitmproxy-config:
