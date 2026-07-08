@@ -13,7 +13,11 @@ source "$SCT_LIBDIR/agents.bash"
 # Optional volumes are added as commented-out entries by default. Set environment
 # variables to "true" before calling this function to add them as active mounts:
 #   - SANDCAT_MOUNT_CLAUDE_CONFIG: "true" to mount host Claude config (~/.claude)
-#   - SANDCAT_MOUNT_CURSOR_CONFIG: "true" to mount host Cursor config (~/.cursor)
+#   - SANDCAT_MOUNT_CURSOR_CONFIG: "true" to mount host Cursor config (~/.cursor
+#     customization read-only; workspace-scoped projects/<id>/ read-write;
+#     mcp.json read-only). chats/, plugins/, and subagents/ stay in agent-home
+#     so other workspaces' runtime state is not exposed. cli-config.json is
+#     driven by cursor.cli in Sandcat settings (not host-mounted).
 #   - SANDCAT_MOUNT_GIT_READONLY: "true" to mount .git directory as read-only
 #   - SANDCAT_MOUNT_IDEA_READONLY: "true" to mount .idea directory as read-only
 # Args:
@@ -51,7 +55,7 @@ customize_compose_file() {
 			add_claude_config_volumes "$compose_file" "${SANDCAT_MOUNT_CLAUDE_CONFIG:=true}"
 			;;
 		cursor)
-			add_cursor_config_volumes "$compose_file" "${SANDCAT_MOUNT_CURSOR_CONFIG:=true}"
+			add_cursor_config_volumes "$compose_file" "${SANDCAT_MOUNT_CURSOR_CONFIG:=true}" "$project_name"
 			;;
 	esac
 
@@ -244,9 +248,13 @@ add_claude_config_volumes() {
 # Args:
 #   $1 - Path to the Docker Compose file
 #   $2 - true to add as active, false to add as comment
+#   $3 - Sandcat project name (scopes projects/ to this workspace only)
 add_cursor_config_volumes() {
 	local compose_file=$1
-	local active=${2:-true}
+	local active=$2
+	local project_name=$3
+	local project_id
+	project_id=$(sct_cursor_workspace_project_id "$project_name")
 
 	# shellcheck disable=SC2016
 	add_volume_entry "$compose_file" '${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro' "$active" 'Host Cursor config (optional)'
@@ -254,6 +262,23 @@ add_cursor_config_volumes() {
 	add_volume_entry "$compose_file" '${HOME}/.cursor/rules:/home/vscode/.cursor/rules:ro' "$active"
 	# shellcheck disable=SC2016
 	add_volume_entry "$compose_file" '${HOME}/.cursor/skills:/home/vscode/.cursor/skills:ro' "$active"
+	# shellcheck disable=SC2016
+	add_volume_entry "$compose_file" '${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro' "$active"
+	# shellcheck disable=SC2016
+	add_volume_entry "$compose_file" '${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro' "$active"
+	# shellcheck disable=SC2016
+	add_volume_entry "$compose_file" '${HOME}/.cursor/hooks:/home/vscode/.cursor/hooks:ro' "$active"
+	# shellcheck disable=SC2016
+	add_volume_entry "$compose_file" '${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro' "$active"
+	# shellcheck disable=SC2016
+	add_volume_entry "$compose_file" '${HOME}/.cursor/mcp.json:/home/vscode/.cursor/mcp.json:ro' "$active"
+	# Workspace-scoped runtime state — only this sandcat project's Cursor
+	# projects/<id>/ tree is mounted (agent transcripts, terminals, etc.).
+	# chats/, plugins/, and subagents/ remain in agent-home to avoid leaking
+	# other workspaces' data from the host profile.
+	add_volume_entry "$compose_file" \
+		"\${HOME}/.cursor/projects/${project_id}:/home/vscode/.cursor/projects/${project_id}" \
+		"$active"
 }
 
 

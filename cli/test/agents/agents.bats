@@ -63,11 +63,28 @@ setup() {
 	assert_output --partial '$HOME/.claude/CLAUDE.md'
 }
 
+@test "sct_cursor_workspace_project_id: encodes /workspaces/<name>" {
+	run sct_cursor_workspace_project_id "foo-bar"
+	assert_output "workspaces-foo-bar"
+
+	run sct_cursor_workspace_project_id "project-sandbox"
+	assert_output "workspaces-project-sandbox"
+}
+
 @test "sct_agent_host_config_paths: cursor lists ~/.cursor entries" {
-	run sct_agent_host_config_paths cursor
+	run sct_agent_host_config_paths cursor "test-project"
 	assert_output --partial '$HOME/.cursor/rules/'
 	assert_output --partial '$HOME/.cursor/skills/'
+	assert_output --partial '$HOME/.cursor/commands/'
+	assert_output --partial '$HOME/.cursor/agents/'
+	assert_output --partial '$HOME/.cursor/hooks/'
+	assert_output --partial '$HOME/.cursor/projects/workspaces-test-project/'
 	assert_output --partial '$HOME/.cursor/AGENTS.md'
+	assert_output --partial '$HOME/.cursor/hooks.json'
+	assert_output --partial '$HOME/.cursor/mcp.json'
+	refute_output --partial '$HOME/.cursor/chats/'
+	refute_output --partial '$HOME/.cursor/plugins/'
+	refute_output --partial '$HOME/.cursor/subagents/'
 }
 
 @test "sct_agent_host_config_paths: unknown returns empty" {
@@ -98,6 +115,48 @@ setup() {
 	assert_success
 
 	[[ ! -d "$HOME/.claude" ]]
+}
+
+@test "ensure_host_agent_config_paths: creates cursor paths under HOME" {
+	export HOME="$BATS_TEST_TMPDIR/home"
+	mkdir -p "$HOME"
+
+	run ensure_host_agent_config_paths cursor test
+	assert_success
+
+	[[ -d "$HOME/.cursor/rules" ]]
+	[[ -d "$HOME/.cursor/skills" ]]
+	[[ -d "$HOME/.cursor/commands" ]]
+	[[ -d "$HOME/.cursor/agents" ]]
+	[[ -d "$HOME/.cursor/hooks" ]]
+	[[ -d "$HOME/.cursor/projects/workspaces-test" ]]
+	[[ -f "$HOME/.cursor/AGENTS.md" ]]
+	[[ -f "$HOME/.cursor/hooks.json" ]]
+	[[ -f "$HOME/.cursor/mcp.json" ]]
+	assert_equal "$(<"$HOME/.cursor/hooks.json")" '{"hooks":{}}'
+	assert_equal "$(<"$HOME/.cursor/mcp.json")" '{"mcpServers":{}}'
+}
+
+@test "ensure_host_agent_config_paths: seeds empty JSON files but preserves existing content" {
+	export HOME="$BATS_TEST_TMPDIR/home"
+	mkdir -p "$HOME/.cursor"
+	printf '%s\n' '{"hooks":{"stop":[{"command":"./hook.sh"}]}}' >"$HOME/.cursor/hooks.json"
+
+	run ensure_host_agent_config_paths cursor test
+	assert_success
+
+	assert_equal "$(<"$HOME/.cursor/hooks.json")" '{"hooks":{"stop":[{"command":"./hook.sh"}]}}'
+}
+
+@test "ensure_host_agent_config_paths: skips when SANDCAT_MOUNT_CURSOR_CONFIG=false" {
+	export HOME="$BATS_TEST_TMPDIR/home"
+	mkdir -p "$HOME"
+	export SANDCAT_MOUNT_CURSOR_CONFIG=false
+
+	run ensure_host_agent_config_paths cursor test
+	assert_success
+
+	[[ ! -d "$HOME/.cursor" ]]
 }
 
 @test "ensure_host_agent_config_paths: no-op for unknown agent" {
@@ -238,10 +297,10 @@ setup() {
 	assert_output --partial "hasCompletedOnboarding"
 }
 
-@test "sct_agent_user_init_block: cursor configures cli-config.json" {
+@test "sct_agent_user_init_block: cursor applies Sandcat cursor.cli fragment" {
 	run sct_agent_user_init_block cursor
-	assert_output --partial "cli-config.json"
-	assert_output --partial "useHttp1ForAgent"
+	assert_output --partial "cursor-cli-config.json"
+	assert_output --partial "Sandcat cursor.cli"
 }
 
 @test "sct_agent_user_init_block: unknown returns empty" {
