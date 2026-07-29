@@ -272,14 +272,17 @@ init() {
 
 	# Optional non-provider features (tui → mitmproxy console)
 	if [[ "$features_provided" != "true" ]]; then
-		local available_features=("tui (mitmproxy console instead of web UI)")
+		local available_features=(
+			"tui (mitmproxy console instead of web UI)"
+		)
 		local selected_features
 		selected_features=$(select_multiple "Select optional features (comma-separated numbers, empty for none):" "${available_features[@]}")
+		# select_multiple returns full labels; match feature keywords and
+		# ignore the remaining label words.
 		if [[ -n "$selected_features" ]]; then
 			for f in $selected_features; do
 				case "$f" in
-					tui*) proxy_mode="tui" ;;
-					*) echo "Unknown feature: $f (expected: tui)" | error; return 1 ;;
+					tui) proxy_mode="tui" ;;
 				esac
 			done
 		fi
@@ -362,6 +365,7 @@ init() {
 	if [[ -n "$stacks_resolved" ]]; then
 		echo "  Stacks:           $stacks_resolved (edit .devcontainer/Dockerfile.app to change versions)" | info
 	fi
+	echo "  Devbox:           edit .devcontainer/devbox.json to add packages, then rebuild (sandcat run --build)" | info
 	echo "  Project settings: $SCT_PROJECT_DIR/settings.json (network rules)" | info
 	echo "  User settings:    ~/.config/sandcat/settings.json (git identity, API keys)" | info
 	echo "  Devcontainer:     .devcontainer/" | info

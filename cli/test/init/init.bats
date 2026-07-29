@@ -237,3 +237,54 @@ teardown() {
 
 	assert_success
 }
+
+@test "init summary always mentions devbox" {
+	stub settings "$PROJECT_DIR/.sandcat/settings.json claude vscode : :"
+	stub devcontainer \
+		"--settings-file .sandcat/settings.json --project-path * --agent claude --ide vscode --name test --stacks * --proxy web --secret-provider none : :"
+
+	run init --agent claude --ide vscode --name test --path "$PROJECT_DIR" --stacks "" --proxy web --features "" --secret-provider none
+	assert_success
+	assert_output --partial "Devbox:"
+}
+
+@test "init --features tui applies the tui feature" {
+	stub settings "$PROJECT_DIR/.sandcat/settings.json claude vscode : :"
+	stub devcontainer \
+		"--settings-file .sandcat/settings.json --project-path * --agent claude --ide vscode --name test --stacks * --proxy tui --secret-provider none : :"
+
+	run init --agent claude --ide vscode --name test --path "$PROJECT_DIR" --stacks "" --features "tui" --secret-provider none
+	assert_success
+}
+
+@test "init rejects unknown feature listing tui" {
+	run init --agent claude --ide vscode --name test --path "$PROJECT_DIR" --stacks "" --features "bogus" --secret-provider none
+	assert_failure
+	assert_output --partial "Unknown feature: bogus (expected: tui)"
+}
+
+@test "init interactive feature selection applies tui from full labels" {
+	unset -f read_line
+	unset -f select_option
+	unset -f select_multiple
+
+	stub read_line "* : echo ''"
+	stub select_option \
+		"'Select agent:' claude cursor : echo claude" \
+		"'Select IDE:' vscode jetbrains none : echo vscode" \
+		"'Select secret provider:' none 1password protonpass : echo none"
+	stub select_multiple \
+		"'Select optional features (comma-separated numbers, empty for none):' 'tui (mitmproxy console instead of web UI)' : echo 'tui (mitmproxy console instead of web UI)'" \
+		"'Select development stacks (comma-separated numbers, empty for none):' node python java rust go scala ruby dotnet zig : echo ''"
+
+	local expected_name
+	expected_name=$(basename "$PROJECT_DIR")-sandbox
+	local settings_file=".sandcat/settings.json"
+
+	stub settings "$PROJECT_DIR/$settings_file claude vscode : :"
+	stub devcontainer \
+		"--settings-file $settings_file --project-path $PROJECT_DIR --agent claude --ide vscode --name $expected_name --stacks '' --proxy tui --secret-provider none : :"
+
+	run init --path "$PROJECT_DIR"
+	assert_success
+}
