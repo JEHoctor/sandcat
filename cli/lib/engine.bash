@@ -74,10 +74,20 @@ sct_engine_run() {
 # Run the configured engine's compose implementation.
 #
 # Both `docker compose` and `podman compose` accept the same subcommands and
-# file layout, so call sites need no branching. Note that `podman compose`
-# delegates to whichever compose provider is installed (podman-compose or the
-# Docker Compose binary), which is why sandcat sticks to portable compose
-# features rather than provider-specific extensions.
+# file layout, so call sites need no branching.
+#
+# `podman compose` delegates to whichever provider it finds, and the choice is
+# not neutral for sandcat: the agent service needs `userns_mode` *and*
+# `network_mode: "service:netns"` together, which is what keeps the agent's UID
+# space disjoint from the proxy's (see sandcat/scripts/netns-init.sh).
+#
+#   - the Docker Compose binary driving podman's socket: works.
+#   - podman-compose: fails. It places every service in a pod, and podman
+#     rejects `--userns` and `--pod` together — the mapping cannot be applied
+#     per-container once a pod's infra container owns the namespace.
+#
+# So install the Docker Compose binary as podman's provider. sandcat otherwise
+# sticks to portable compose features rather than provider-specific extensions.
 sct_engine_compose() {
 	sct_engine_run compose "$@"
 }

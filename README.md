@@ -49,29 +49,47 @@ The CLI can itself be run through a docker image that we publish to our
 repository, so that no local installation is required; or installed locally by
 cloning this git repository.
 
-#### Run as docker image (recommended)
+#### Run as a container image (recommended)
 
 ```bash
-# Pull the image to local docker
-docker pull ghcr.io/virtuslab/sandcat
+# Podman
+podman pull ghcr.io/virtuslab/sandcat
 
 # Add to your .bashrc or .zshrc
-alias sandcat='docker run --rm -it -v "/var/run/docker.sock:/var/run/docker.sock" -v"$PWD:$PWD" -v"$HOME/.config/sandcat:$HOME/.config/sandcat" -w"$PWD" -e TERM -e HOME ghcr.io/virtuslab/sandcat'
+alias sandcat='podman run --rm -it -v "$XDG_RUNTIME_DIR/podman/podman.sock:/var/run/podman/podman.sock" -v"$PWD:$PWD" -v"$HOME/.config/sandcat:$HOME/.config/sandcat" -w"$PWD" -e TERM -e HOME -e CONTAINER_HOST=unix:///var/run/podman/podman.sock ghcr.io/virtuslab/sandcat'
 ```
 
-The CLI needs access to your current directory (to copy project configuration),
-the host Docker socket (to manage sandbox containers), your user config
-directory (`~/.config/sandcat/` to initialize the settings file), and a couple
-of environment variables (`TERM` for terminal handling, `HOME` so Docker Compose
-can resolve `~` in volume mounts).
+The podman socket is not enabled by default; start it once with
+`systemctl --user enable --now podman.socket`.
 
-Using the Docker image disables the editor integration (`vi` installed in the
+<details>
+<summary>Docker equivalent</summary>
+
+```bash
+docker pull ghcr.io/virtuslab/sandcat
+
+alias sandcat='docker run --rm -it -v "/var/run/docker.sock:/var/run/docker.sock" -v"$PWD:$PWD" -v"$HOME/.config/sandcat:$HOME/.config/sandcat" -w"$PWD" -e TERM -e HOME -e SANDCAT_ENGINE=docker ghcr.io/virtuslab/sandcat'
+```
+
+The image ships both clients and prefers podman, so `SANDCAT_ENGINE=docker`
+pins it to Docker.
+</details>
+
+The CLI needs access to your current directory (to copy project configuration),
+the host engine socket (to manage sandbox containers), your user config
+directory (`~/.config/sandcat/` to initialize the settings file), and a couple
+of environment variables (`TERM` for terminal handling, `HOME` so compose can
+resolve `~` in volume mounts).
+
+Using the container image disables the editor integration (`vi` installed in the
 image will be used instead of your host editor). Host environment variables are
 not forwarded unless you add `-e` flags explicitly.
 
-The image runs as root, to avoid permission issues with the host Docker socket.
-On Colima file ownership is mapped automatically, on Linux you should add
-`--user` parameter accordingly.
+The image runs as root to avoid permission issues with the host engine socket.
+Under rootless podman that container-root is already mapped to your own
+unprivileged host UID, so it grants nothing on the host. Under Docker it is
+real root: on Colima file ownership is mapped automatically, on Linux you
+should add a `--user` parameter accordingly.
 
 #### Local install
 
@@ -1018,6 +1036,10 @@ flowchart LR
   the route and firewall but cannot modify them (no `NET_ADMIN`). They install
   the mitmproxy CA cert into the system trust store at startup so TLS
   interception works.
+- On podman, sandcat needs the Docker Compose binary as the compose provider.
+  `podman-compose` places every service in a pod, and podman rejects
+  `--userns` together with `--pod` — which breaks the agent's UID mapping
+  described next.
 - The agent runs with `userns_mode: auto`, so container-root maps to an
   unprivileged host UID. This is not just about host safety: the kill switch
   exempts the proxy's UID from its egress DROP, so an agent sharing the host's
