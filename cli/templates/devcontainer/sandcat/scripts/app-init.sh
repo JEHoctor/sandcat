@@ -8,11 +8,14 @@
 #
 set -e
 
-# Adopt wg-client's resolv.conf. We share its network namespace via
+# Adopt the netns container's resolv.conf. We share its network namespace via
 # network_mode but each container has its own /etc/resolv.conf in its own
-# mount namespace, so we have to copy it explicitly to point our DNS at
-# wg-client's local dnsmasq (127.0.0.1) instead of whatever Docker wrote here.
-# Use cat (not cp) because /etc/resolv.conf is bind-mounted by Docker and
+# mount namespace, so we have to copy it explicitly. What the engine wrote here
+# points at its embedded resolver, which is reachable without traversing the
+# TUN device and is therefore blocked by the kill switch; the published file
+# points at an address that routes over the tunnel, where mitmproxy applies
+# the same allow/deny rules it applies to HTTP.
+# Use cat (not cp) because /etc/resolv.conf is bind-mounted by the engine and
 # can't be replaced — only its contents can be rewritten in-place.
 SHARED_RESOLV_CONF="/run/sandcat/resolv.conf"
 if [ -f "$SHARED_RESOLV_CONF" ]; then
