@@ -3,6 +3,8 @@ set -euo pipefail
 
 # shellcheck source=../../lib/require.bash
 source "$SCT_LIBDIR/require.bash"
+# shellcheck source=../../lib/engine.bash
+source "$SCT_LIBDIR/engine.bash"
 # shellcheck source=../../lib/path.bash
 source "$SCT_LIBDIR/path.bash"
 # shellcheck source=../../lib/volume.bash
@@ -10,10 +12,10 @@ source "$SCT_LIBDIR/volume.bash"
 
 # Run a command in the agent container.
 # Starts dependencies, runs the command, then tears everything down.
-# Options before '--' are passed to docker compose run (e.g. --build).
+# Options before '--' are passed to `compose run` (e.g. --build).
 # Arguments after '--' (or all args if no '--') are the command to run.
 run() {
-	require docker
+	require_engine
 
 	local compose_file
 	compose_file="$(find_compose_file)"
@@ -39,8 +41,8 @@ run() {
 	ensure_shared_cache_volumes "$compose_file"
 
 	local rc=0
-	docker compose -f "$compose_file" run --rm "${run_opts[@]+"${run_opts[@]}"}" agent "${1-bash}" "${@:2}" || rc=$?
-	docker compose -f "$compose_file" down
+	sct_engine_compose -f "$compose_file" run --rm "${run_opts[@]+"${run_opts[@]}"}" agent "${1-bash}" "${@:2}" || rc=$?
+	sct_engine_compose -f "$compose_file" down
 	return "$rc"
 }
 

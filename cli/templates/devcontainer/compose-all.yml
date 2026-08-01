@@ -6,10 +6,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.app
-    # Share wg-client's network namespace so all traffic goes through its
-    # WireGuard tunnel. The app container has no NET_ADMIN capability,
-    # so processes inside cannot modify routing, iptables, or the tunnel.
-    network_mode: "service:wg-client"
+    # Share the netns container's network namespace so all traffic goes through
+    # the TUN device mitmproxy terminates. This container has no NET_ADMIN, so
+    # processes inside cannot modify the routing or the kill switch — it can
+    # see them, but not change them.
+    network_mode: "service:netns"
+    # Container-root here maps to an unprivileged, otherwise-unused host UID
+    # range. That serves two purposes at once: the agent can install packages
+    # without root on the host, and its UIDs cannot collide with the proxy's,
+    # which is what keeps the kill switch's uid-based egress exemption sound
+    # even when something in this container runs as root.
+    userns_mode: "auto"
     volumes:
       # Named volume for the home directory so Claude Code auth state,
       # shell history, and other user-level config persist across rebuilds.
@@ -18,13 +25,18 @@ services:
       # sandcat.env (env vars + secret placeholders). Read-only — app
       # containers should never write to this.
       - mitmproxy-config:/mitmproxy-config:ro
-      # Resolv.conf published by wg-client. We copy it into /etc/resolv.conf
-      # in app-init.sh so DNS goes to wg-client's local dnsmasq instead of
-      # whatever Docker initialized this container's resolv.conf to.
-      - wg-runtime:/run/sandcat:ro
+      # Resolv.conf published by the netns container. We copy it into
+      # /etc/resolv.conf in app-init.sh so DNS is addressed over the tunnel
+      # rather than to the engine's embedded resolver, which the kill switch
+      # blocks for everyone but the proxy.
+      - netns-runtime:/run/sandcat:ro
     command: sleep infinity
     depends_on:
-      wg-client:
+      # Gated on mitmproxy rather than the netns container: app-init.sh needs
+      # the CA cert, which only exists once mitmproxy has started. mitmproxy in
+      # turn waits for netns, so the namespace and kill switch are always in
+      # place first.
+      mitmproxy:
         condition: service_healthy
 
 volumes:

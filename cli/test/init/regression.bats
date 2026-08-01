@@ -33,7 +33,13 @@ assert_agent_service() {
 
 	yq -e '.services.agent.working_dir == "/workspaces/project-sandbox"' "$compose_file"
 
-	yq -e '.services.agent.network_mode == "service:wg-client"' "$compose_file"
+	yq -e '.services.agent.network_mode == "service:netns"' "$compose_file"
+
+	# Container-root in the agent must map to an unprivileged host UID. The
+	# kill switch exempts the proxy's UID from its egress DROP, so an agent
+	# sharing the host UID space could assume that UID and walk around the
+	# proxy entirely. The user namespace is what keeps the two disjoint.
+	yq -e '.services.agent.userns_mode == "auto"' "$compose_file"
 
 	# FIXME vscode startup fails with capabilities dropped
 	# yq -e '.services.agent.cap_drop[] | select(. == "ALL")' "$compose_file"

@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Entrypoint for containers that share the wg-client's network namespace.
+# Entrypoint for containers that share the netns container's network namespace.
 # Installs the mitmproxy CA cert, disables commit signing, loads env vars
 # and secret placeholders from sandcat.env, runs vscode-user setup (git
 # identity, Java trust store, Claude Code update), then drops to vscode
@@ -8,22 +8,55 @@
 #
 set -e
 
-# Adopt wg-client's resolv.conf. We share its network namespace via
+# Adopt the netns container's resolv.conf. We share its network namespace via
 # network_mode but each container has its own /etc/resolv.conf in its own
-# mount namespace, so we have to copy it explicitly to point our DNS at
-# wg-client's local dnsmasq (127.0.0.1) instead of whatever Docker wrote here.
-# Use cat (not cp) because /etc/resolv.conf is bind-mounted by Docker and
+# mount namespace, so we have to copy it explicitly. What the engine wrote here
+# points at its embedded resolver, which is reachable without traversing the
+# TUN device and is therefore blocked by the kill switch; the published file
+# points at an address that routes over the tunnel, where mitmproxy applies
+# the same allow/deny rules it applies to HTTP.
+# Use cat (not cp) because /etc/resolv.conf is bind-mounted by the engine and
 # can't be replaced — only its contents can be rewritten in-place.
 SHARED_RESOLV_CONF="/run/sandcat/resolv.conf"
 if [ -f "$SHARED_RESOLV_CONF" ]; then
     cat "$SHARED_RESOLV_CONF" > /etc/resolv.conf
 fi
 
+# Splice extra_hosts entries into /etc/hosts. mitmproxy writes user-configured
+# entries to the shared mitmproxy-config volume as an /etc/hosts fragment (see
+# _write_extra_hosts in mitmproxy_addon_common.py) — but it has no /etc/hosts
+# of its own worth writing into, since agents reach it by joining this
+# container's namespace, not the other way around. This container's
+# /etc/hosts is what `getent hosts <name>` resolves against, so we're the ones
+# who splice it in.
+#
+# Always strip the sentinel block first (even when the sidecar file is
+# absent or empty) so stale entries from a previous run of this container
+# can't leak into a start where extra_hosts has since been emptied.
+#
+# /etc/hosts is bind-mounted by the engine, so `sed -i` fails at rename(2)
+# with EBUSY ("Device or resource busy"). Read the file into a variable,
+# filter the sentinel block out, then truncate + rewrite in place so we never
+# leave the file's inode.
+EXTRA_HOSTS_FILE="/mitmproxy-config/extra_hosts"
+hosts_content=$(awk '
+    /^# sandcat extra_hosts BEGIN/ { skip = 1; next }
+    /^# sandcat extra_hosts END/   { skip = 0; next }
+    !skip
+' /etc/hosts)
+printf '%s\n' "$hosts_content" > /etc/hosts
+if [ -s "$EXTRA_HOSTS_FILE" ]; then
+    {
+        echo "# sandcat extra_hosts BEGIN"
+        cat "$EXTRA_HOSTS_FILE"
+        echo "# sandcat extra_hosts END"
+    } >> /etc/hosts
+fi
+
 CA_CERT="/mitmproxy-config/mitmproxy-ca-cert.pem"
 
-# The CA cert is guaranteed to exist: app depends_on wg-client (healthy),
-# which depends_on mitmproxy (healthy), whose healthcheck requires both
-# wireguard.conf and mitmproxy-ca-cert.pem.
+# The CA cert is guaranteed to exist: app depends_on mitmproxy (healthy),
+# whose healthcheck requires mitmproxy-ca-cert.pem.
 if [ ! -f "$CA_CERT" ]; then
     echo "mitmproxy CA cert not found at $CA_CERT" >&2
     exit 1

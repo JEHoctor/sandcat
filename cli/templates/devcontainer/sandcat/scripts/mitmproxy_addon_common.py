@@ -73,9 +73,9 @@ CURSOR_CLI_CONFIG_PATH = "/home/mitmproxy/.mitmproxy/cursor-cli-config.json"
 # One IPv4/IPv6 address per line; empty or missing file means "use defaults".
 # (glibc/musl resolvers reject hostnames in `nameserver` directives.)
 SANDCAT_DNS_CONF_PATH = "/home/mitmproxy/.mitmproxy/dns.conf"
-# Sidecar file consumed by wg-client-init.sh. `IP<TAB>hostname` per line.
+# Sidecar file consumed by app-init.sh. `IP<TAB>hostname` per line.
 # ALWAYS written by the addon (empty file when nothing configured) so
-# wg-client-init treats file-existence as authoritative and can clean out
+# app-init.sh treats file-existence as authoritative and can clean out
 # stale entries from previous runs.
 EXTRA_HOSTS_PATH = "/home/mitmproxy/.mitmproxy/extra_hosts"
 
@@ -580,14 +580,13 @@ class SandcatAddon:
     def _write_extra_hosts(self, extra_hosts: dict[str, str]):
         """Write extra_hosts entries as an /etc/hosts-format file.
 
-        Consumed by wg-client-init.sh, which appends the file inside a
-        sentinel block in /etc/hosts. The agent inherits that /etc/hosts
-        via network_mode: service:wg-client, so `getent hosts <name>`
-        resolves the name via NSS before any DNS query.
+        Consumed by app-init.sh, which appends the file inside a sentinel
+        block in its own /etc/hosts, so `getent hosts <name>` resolves the
+        name via NSS before any DNS query.
 
         Invalid entries are logged and skipped; the container still starts.
         ALWAYS writes the file (empty when nothing configured) so
-        wg-client-init can treat file-existence as authoritative and clean
+        app-init.sh can treat file-existence as authoritative and clean
         stale entries from previous runs.
 
         IPv6 entries are validated but the container's kill-switch drops
@@ -628,7 +627,7 @@ class SandcatAddon:
         except OSError as e:
             ctx.log.warn(
                 f"Could not write {EXTRA_HOSTS_PATH}: {e!r}; "
-                "wg-client will continue with its previous /etc/hosts entries"
+                "app-init.sh will continue with its previous /etc/hosts entries"
             )
             return
         if lines:

@@ -2,7 +2,7 @@
 
 Command-line tool for managing sandcat configurations and Docker Compose setups.
 
-Requires `docker` (and `docker compose`) and [`yq`](https://github.com/mikefarah/yq).
+Requires `podman` or `docker` (with their `compose` subcommand) and [`yq`](https://github.com/mikefarah/yq).
 
 See the top-level [README](../README.md#1-install-sandcat-cli) for install
 options: Docker image, shell installer (`curl … | sh`), or local git
@@ -183,7 +183,7 @@ Opens the mitmproxy interface for traffic inspection. Behavior depends on the pr
 
 ### `sandcat restart-proxy`
 
-Restarts the mitmproxy and wg-client services to pick up settings changes. Run this after editing any settings
+Restarts the mitmproxy and netns services to pick up settings changes. Run this after editing any settings
 file (project or user) to apply the new configuration.
 
 ### `sandcat run`
