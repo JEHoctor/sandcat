@@ -57,30 +57,28 @@ services:
     # inside it. This is what removes the need for a tunnel transport: the
     # proxy is already in the namespace whose traffic it inspects.
     network_mode: "service:netns"
-    # Runs as the UID that owns the TUN device. A *persistent* TUN device can
-    # be reopened by its owning UID with no capabilities at all, so the
-    # component that parses untrusted traffic holds zero privilege. This UID
-    # must stay distinct from any the agent can assume — the kill switch's
-    # egress exemption is keyed on it.
-    user: "1001:1001"
+    # Starts as root only long enough to hand the TUN device node to the proxy
+    # UID, then drops to it with no capabilities — see scripts/mitmproxy-init.sh
+    # for why that cannot be done from the netns container. mitmproxy itself
+    # runs unprivileged; this UID must stay distinct from any the agent can
+    # assume, because the kill switch's egress exemption is keyed on it.
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN  # handing the device node over
+      - SETUID # dropping to the proxy UID
+      - SETGID # ditto
     devices:
-      # Needed to open the device node; attaching to the already-created,
+      # Needed to open the device node. Attaching to the already-created,
       # already-owned TUN interface then requires no capability.
       - /dev/net/tun
-    # Delete the stale dns.conf sentinel before mitmweb starts (see healthcheck
-    # below). The mitmproxy-config volume persists across restarts, so a dns.conf
-    # left by a previous run would satisfy the healthcheck immediately — letting
-    # dependents start and read outdated upstream DNS (e.g. after editing
-    # `dns_servers`) before the addon rewrites it. Wrap the image entrypoint (not
-    # the command) so docker-entrypoint.sh still sees `mitmweb` as $1.
-    entrypoint: ["/bin/sh", "-c", "rm -f /home/mitmproxy/.mitmproxy/dns.conf && exec docker-entrypoint.sh \"$@\"", "sh"]
+    entrypoint: ["/bin/sh", "/scripts/mitmproxy-init.sh"]
     command: mitmweb --mode tun:tun0 --web-host 0.0.0.0 --set web_password=mitmproxy --set http2=__MITM_HTTP2__ __AGENT_MITM_STREAMING_FLAGS__ -s /scripts/__AGENT_MITM_ADDON__
     volumes:
       - mitmproxy-config:/home/mitmproxy/.mitmproxy
       - ./scripts/__AGENT_MITM_ADDON__:/scripts/__AGENT_MITM_ADDON__:ro
       - ./scripts/mitmproxy_addon_common.py:/scripts/mitmproxy_addon_common.py:ro
+      - ./scripts/mitmproxy-init.sh:/scripts/mitmproxy-init.sh:ro
       - ~/.config/sandcat/settings.json:/config/settings.json:ro
     depends_on:
       netns:
