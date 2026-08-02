@@ -30,7 +30,7 @@ teardown() {
 @test "add_settings_volume adds settings mount to proxy service" {
 	add_settings_volume "$COMPOSE_FILE" ".sandcat/settings.json"
 
-	yq -e '.services.mitmproxy.volumes[] | select(. == ".sandcat:/config/project:ro")' "$COMPOSE_FILE"
+	yq -e '.services.mitmproxy.volumes[] | select(. == ".sandcat:/config/project:ro,z")' "$COMPOSE_FILE"
 }
 
 @test "add_claude_config_volumes adds CLAUDE.md and settings.json" {
@@ -40,13 +40,13 @@ teardown() {
 	assert_output "4"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/agents:/home/vscode/.claude/agents:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/agents:/home/vscode/.claude/agents:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/commands:/home/vscode/.claude/commands:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/commands:/home/vscode/.claude/commands:ro,z")' "$COMPOSE_FILE"
 }
 
 @test "add_cursor_config_volumes adds customization and state mounts" {
@@ -56,31 +56,31 @@ teardown() {
 	assert_output "10"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/rules:/home/vscode/.cursor/rules:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/rules:/home/vscode/.cursor/rules:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/skills:/home/vscode/.cursor/skills:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/skills:/home/vscode/.cursor/skills:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/hooks:/home/vscode/.cursor/hooks:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/hooks:/home/vscode/.cursor/hooks:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/mcp.json:/home/vscode/.cursor/mcp.json:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/mcp.json:/home/vscode/.cursor/mcp.json:ro,z")' "$COMPOSE_FILE"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/projects/workspaces-test-project:/home/vscode/.cursor/projects/workspaces-test-project")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/projects/workspaces-test-project:/home/vscode/.cursor/projects/workspaces-test-project:z")' "$COMPOSE_FILE"
 }
 
 
@@ -120,13 +120,13 @@ teardown() {
 @test "add_git_readonly_volume adds .git mount as read-only" {
 	add_git_readonly_volume "$COMPOSE_FILE"
 
-	yq -e '.services.agent.volumes[] | select(. == "../.git:/workspace/.git:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "../.git:/workspace/.git:ro,z")' "$COMPOSE_FILE"
 }
 
 @test "add_idea_readonly_volume adds .idea mount as read-only" {
 	add_idea_readonly_volume "$COMPOSE_FILE"
 
-	yq -e '.services.agent.volumes[] | select(. == "../.idea:/workspace/.idea:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "../.idea:/workspace/.idea:ro,z")' "$COMPOSE_FILE"
 }
 
 @test "add_shared_cache_volumes with java stack mounts all six JVM cache paths" {
@@ -274,18 +274,18 @@ assert_customize_compose_file_common() {
 	local compose_file=$1
 
 	# Verify settings volume on proxy
-	yq -e '.services.mitmproxy.volumes[] | select(. == ".sandcat:/config/project:ro")' "$compose_file"
+	yq -e '.services.mitmproxy.volumes[] | select(. == ".sandcat:/config/project:ro,z")' "$compose_file"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro")' "$compose_file"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro,z")' "$compose_file"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/agents:/home/vscode/.claude/agents:ro")' "$compose_file"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/agents:/home/vscode/.claude/agents:ro,z")' "$compose_file"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/commands:/home/vscode/.claude/commands:ro")' "$compose_file"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/commands:/home/vscode/.claude/commands:ro,z")' "$compose_file"
 
-	yq -e '.services.agent.volumes[] | select(. == "../.git:/workspace/.git:ro")' "$compose_file"
+	yq -e '.services.agent.volumes[] | select(. == "../.git:/workspace/.git:ro,z")' "$compose_file"
 }
 
 @test "add_jetbrains_capabilities adds JetBrains-specific capabilities" {
@@ -358,9 +358,9 @@ EOF
 	run yq '.services.agent.working_dir' "$COMPOSE_FILE"
 	assert_output "/workspaces/my-project"
 
-	yq -e '.services.agent.volumes[] | select(. == "..:/workspaces/my-project")' "$COMPOSE_FILE"
-	yq -e '.services.agent.volumes[] | select(. == "../.devcontainer:/workspaces/my-project/.devcontainer:ro")' "$COMPOSE_FILE"
-	yq -e '.services.agent.volumes[] | select(. == "../.sandcat:/workspaces/my-project/.sandcat:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "..:/workspaces/my-project:z")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "../.devcontainer:/workspaces/my-project/.devcontainer:ro,z")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "../.sandcat:/workspaces/my-project/.sandcat:ro,z")' "$COMPOSE_FILE"
 }
 
 # shellcheck disable=SC2016
@@ -372,9 +372,9 @@ EOF
 	customize_compose_file "$SETTINGS_FILE" "$COMPOSE_FILE" "claude" "jetbrains" "test-project"
 
 	# Verify Claude config volumes are active
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro")' "$COMPOSE_FILE"
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/agents:/home/vscode/.claude/agents:ro")' "$COMPOSE_FILE"
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/commands:/home/vscode/.claude/commands:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro,z")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/agents:/home/vscode/.claude/agents:ro,z")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.claude/commands:/home/vscode/.claude/commands:ro,z")' "$COMPOSE_FILE"
 
 	# With JetBrains IDE, the .idea mount is also active by default.
 	# 1 initial + 3 workspace + 3 Claude + 1 .idea = 8 active volumes.
@@ -392,16 +392,16 @@ EOF
 	customize_compose_file "$SETTINGS_FILE" "$COMPOSE_FILE" "claude" "jetbrains" "test-project"
 
 	# Verify settings volume on proxy
-	yq -e '.services.mitmproxy.volumes[] | select(. == ".sandcat:/config/project:ro")' "$COMPOSE_FILE"
+	yq -e '.services.mitmproxy.volumes[] | select(. == ".sandcat:/config/project:ro,z")' "$COMPOSE_FILE"
 
 	# Verify .idea volume is active
-	yq -e '.services.agent.volumes[] | select(. == "../.idea:/workspace/.idea:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "../.idea:/workspace/.idea:ro,z")' "$COMPOSE_FILE"
 
 	# Optional inactive mounts should be present as foot comments on the initial workspace volume entry
 	# Note: sed on line 92 of composefile.bash merges foot comments into the next sibling as head comments
 	# so the yq's foot_comment is empty.
 	run yq -P '.services.agent.volumes' "$COMPOSE_FILE"
-	assert_line '# - ../.git:/workspace/.git:ro'
+	assert_line '# - ../.git:/workspace/.git:ro,z'
 
 	# JetBrains capabilities should still be added
 	assert_jetbrains_capabilities "$COMPOSE_FILE"
@@ -419,7 +419,7 @@ EOF
 	customize_compose_file "$SETTINGS_FILE" "$COMPOSE_FILE" "claude" "jetbrains" "test-project"
 
 	assert_customize_compose_file_common "$COMPOSE_FILE"
-	yq -e '.services.agent.volumes[] | select(. == "../.idea:/workspace/.idea:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "../.idea:/workspace/.idea:ro,z")' "$COMPOSE_FILE"
 	assert_jetbrains_capabilities "$COMPOSE_FILE"
 }
 
@@ -447,15 +447,15 @@ EOF
 	customize_compose_file "$SETTINGS_FILE" "$COMPOSE_FILE" "cursor" "vscode" "test-project"
 
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro,z")' "$COMPOSE_FILE"
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro,z")' "$COMPOSE_FILE"
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro,z")' "$COMPOSE_FILE"
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro,z")' "$COMPOSE_FILE"
 	# shellcheck disable=SC2016
-	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/projects/workspaces-test-project:/home/vscode/.cursor/projects/workspaces-test-project")' "$COMPOSE_FILE"
+	yq -e '.services.agent.volumes[] | select(. == "${HOME}/.cursor/projects/workspaces-test-project:/home/vscode/.cursor/projects/workspaces-test-project:z")' "$COMPOSE_FILE"
 	# No claude volumes leak through when agent=cursor.
 	run yq '.services.agent.volumes[] | select(test("\\.claude/"))' "$COMPOSE_FILE"
 	assert_output ""

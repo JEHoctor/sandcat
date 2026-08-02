@@ -19,6 +19,14 @@ services:
     devices:
       # Required to create the TUN device: /dev/net/tun is not present in a
       # container's /dev by default.
+      #
+      # On an SELinux-enforcing host (Fedora, RHEL, and derivatives),
+      # NET_ADMIN alone is not enough: `container_use_devices` (off by
+      # default) also has to be enabled on the host — a host-level policy
+      # setting, not something addressable from this file:
+      #     sudo setsebool -P container_use_devices on
+      # netns-init.sh checks for this at startup and fails with the same
+      # pointer rather than the opaque error the check replaces.
       - /dev/net/tun
     cap_drop:
       - ALL
@@ -74,12 +82,22 @@ services:
       - /dev/net/tun
     entrypoint: ["/bin/sh", "/scripts/mitmproxy-init.sh"]
     command: mitmweb --mode tun:tun0 --web-host 0.0.0.0 --set web_password=mitmproxy --set http2=__MITM_HTTP2__ __AGENT_MITM_STREAMING_FLAGS__ -s /scripts/__AGENT_MITM_ADDON__
+    # Host bind mounts below carry `,z` in their mode field: on an
+    # SELinux-enforcing host, files under a user's home directory are labeled
+    # `user_home_t`, which the confined container_t domain cannot read at
+    # all — unlike the /dev/net/tun case above, no capability or boolean
+    # substitutes for a relabel here. `z` (shared) rather than `Z` (private)
+    # because settings.json is expected to be mounted into more than one
+    # project's mitmproxy at once; a private relabel would let a second
+    # project's mount revoke the first's access to the same file.
+    # mitmproxy-config is a named volume and needs no such suffix — the
+    # engine labels those correctly on creation.
     volumes:
       - mitmproxy-config:/home/mitmproxy/.mitmproxy
-      - ./scripts/__AGENT_MITM_ADDON__:/scripts/__AGENT_MITM_ADDON__:ro
-      - ./scripts/mitmproxy_addon_common.py:/scripts/mitmproxy_addon_common.py:ro
-      - ./scripts/mitmproxy-init.sh:/scripts/mitmproxy-init.sh:ro
-      - ~/.config/sandcat/settings.json:/config/settings.json:ro
+      - ./scripts/__AGENT_MITM_ADDON__:/scripts/__AGENT_MITM_ADDON__:ro,z
+      - ./scripts/mitmproxy_addon_common.py:/scripts/mitmproxy_addon_common.py:ro,z
+      - ./scripts/mitmproxy-init.sh:/scripts/mitmproxy-init.sh:ro,z
+      - ~/.config/sandcat/settings.json:/config/settings.json:ro,z
     depends_on:
       netns:
         condition: service_healthy
