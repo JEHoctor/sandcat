@@ -1356,6 +1356,37 @@ started yet).
 mitmproxy CA may not be trusted. See [TLS and CA
 certificates](#tls-and-ca-certificates) for runtime-specific configuration.
 
+**`netns` fails to start with a TUN device permission error, on Podman +
+SELinux (Fedora, RHEL, and derivatives).** `sandcat compose logs netns` shows
+`Cannot open /dev/net/tun: Permission denied`. `NET_ADMIN` alone isn't enough
+on an SELinux-enforcing host — device passthrough via `devices:` also needs
+the `container_use_devices` boolean, which defaults to off:
+
+```sh
+getsebool container_use_devices   # confirm this is what's blocking it
+sudo setsebool -P container_use_devices on
+```
+
+This is a host-level setting, not something addressable from a compose file or
+the sandbox's own containers — it has to be applied on the machine running
+Podman, once. It only affects devices a container's `devices:` already lists
+(a container's `/dev` is otherwise empty of host devices regardless of this
+boolean), so it's narrower than it might sound: enabling it doesn't expose
+devices sandcat doesn't already ask for.
+
+If you can't get the boolean changed (e.g. no root on a shared or managed
+host), the fallback is disabling SELinux confinement for just the affected
+services, which is broader — it removes labeled confinement for those
+containers generally, not only for device access:
+
+```yaml
+services:
+  netns:
+    security_opt: ["label=disable"]
+  mitmproxy:
+    security_opt: ["label=disable"]
+```
+
 ## Unit tests
 
 **Python tests** (mitmproxy addon):

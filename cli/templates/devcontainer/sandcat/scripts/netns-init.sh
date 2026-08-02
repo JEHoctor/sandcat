@@ -54,6 +54,11 @@ TUN_DEV="${SANDCAT_TUN_DEV:-tun0}"
 TUN_ADDR="${SANDCAT_TUN_ADDR:-10.99.0.1/24}"
 TUN_MTU="${SANDCAT_TUN_MTU:-1420}"
 
+# The kernel's TUN/TAP clone device, not the interface created from it. `ip
+# tuntap add` opens this internally; checked directly in check_tun_openable()
+# because its own error text is what needs disambiguating.
+TUN_CLONE_DEVICE="${SANDCAT_TUN_CLONE_DEVICE:-/dev/net/tun}"
+
 # UID/GID mitmproxy runs as. Must match the `user:` of the mitmproxy service
 # and must differ from any UID the agent can assume — the kill switch's egress
 # exemption is keyed on it.
@@ -193,6 +198,62 @@ default_gateway() {
 	ip -4 route show default | awk '/default/ { print $3; exit }'
 }
 
+# Confirm the TUN clone device can actually be opened, and fail with a
+# specific, actionable message when it can't.
+#
+# Without this, a permission denial here surfaces only much later and
+# opaquely — as `ip tuntap add`'s bare "open: Permission denied", or on hosts
+# where mitmproxy's own entrypoint hits the same wall first, as mitmproxy's
+# "Failed to create TUN device". Neither points at the actual cause.
+#
+# On SELinux-enforcing hosts (Fedora, RHEL, and derivatives) with
+# container-selinux installed, `--device` passthrough of a device outside the
+# small set the default policy already permits — which includes TUN/TAP — is
+# denied by the confined container_t domain until the `container_use_devices`
+# boolean is enabled. This is not a broad label bypass: it does not touch
+# what an unmodified container can reach by default. It only affects devices
+# already explicitly listed in `devices:` in compose-proxy.yml, since a
+# container's /dev is otherwise empty of host devices regardless of the
+# boolean's state.
+#
+# CAP_NET_ADMIN is checked for separately (the `ip tuntap add` call itself)
+# because its failure mode — "Operation not permitted" — is already
+# unambiguous; only the open denial needed disambiguating here.
+check_tun_openable() {
+	# Driven off the open attempt's own error text, not a separate `[[ -e ]]`
+	# check first: under SELinux denial, stat() itself fails with EACCES, and
+	# bash's `-e` test can't distinguish that from ENOENT — it just reports
+	# "does not exist," which would point at the wrong fix ("add it under
+	# devices:") for a device that was already added correctly.
+	local open_error
+	if ! open_error=$( { : < "$TUN_CLONE_DEVICE"; } 2>&1 )
+	then
+		if [[ "$open_error" == *"no such file"* ]]
+		then
+			echo "$TUN_CLONE_DEVICE does not exist in this container." >&2
+			echo "Add it under 'devices:' for the netns service in compose-proxy.yml." >&2
+			exit 1
+		fi
+
+		echo "Cannot open $TUN_CLONE_DEVICE: $open_error" >&2
+		if [[ "$open_error" == *"Permission denied"* ]]
+		then
+			echo >&2
+			echo "On an SELinux-enforcing host, this is the container_use_devices" >&2
+			echo "boolean (off by default). Enable it on the host, not in the" >&2
+			echo "container — this is a host-level policy setting:" >&2
+			echo "    sudo setsebool -P container_use_devices on" >&2
+			echo >&2
+			echo "This grants confined containers read/write/ioctl on devices" >&2
+			echo "already listed in their own 'devices:', nothing broader — it" >&2
+			echo "does not disable SELinux confinement otherwise. Weaker than the" >&2
+			echo "correct fix but scoped to this one container as a fallback:" >&2
+			echo "'security_opt: [\"label=disable\"]' on the netns service." >&2
+		fi
+		exit 1
+	fi
+}
+
 main() {
 	# Production behavior is errexit; kept inside main() so sourcing this file
 	# (e.g. from bats tests) doesn't enable errexit in the caller's shell.
@@ -209,6 +270,8 @@ main() {
 	fi
 
 	# ── TUN device ──────────────────────────────────────────────────────────
+	check_tun_openable
+
 	# Created persistent and owned by the proxy UID so mitmproxy can attach to
 	# it later holding no capabilities. Without `user`/`group` here the device
 	# would be root-only and mitmproxy would need NET_ADMIN of its own.
