@@ -11,11 +11,32 @@ services:
     # processes inside cannot modify the routing or the kill switch — it can
     # see them, but not change them.
     network_mode: "service:netns"
-    # Container-root here maps to an unprivileged, otherwise-unused host UID
-    # range. That serves two purposes at once: the agent can install packages
-    # without root on the host, and its UIDs cannot collide with the proxy's,
-    # which is what keeps the kill switch's uid-based egress exemption sound
-    # even when something in this container runs as root.
+    # Podman-only host-safety property: container-root maps to an
+    # unprivileged, otherwise-unused host UID range, so if this container ever
+    # runs code as root (e.g. installing a system package), that root is not
+    # real root on the machine running the sandbox.
+    #
+    # Docker does not honor this. It accepts the field without error and
+    # silently does nothing with it — Docker's actual user-namespace
+    # mechanism is a daemon-wide `--userns-remap` flag in daemon.json, not a
+    # per-container mode, and it has no concept of "auto". Verified directly:
+    # under plain `docker compose` (no daemon-level remap configured, the
+    # common case), this container's root is unmapped, real host root
+    # (`uid_map: 0 0 4294967295`) — no warning, container starts normally.
+    #
+    # Currently dormant rather than a live gap: nothing in this image runs as
+    # root at runtime today (packages install via devbox/nix into the user's
+    # own home directory, no root needed), so there is no code path that
+    # currently exercises the property this line claims. It matters the
+    # moment that changes — e.g. giving the agent real package-manager access
+    # — and only actually holds under Podman when it does.
+    #
+    # Unrelated to this: the kill switch's uid-based egress exemption (see
+    # sandcat/scripts/netns-init.sh) does not depend on this line. It holds on
+    # both engines via ordinary capability semantics — app-init.sh's
+    # `exec gosu vscode "$@"` drops to a non-root user, and the kernel clears
+    # effective/permitted capabilities on that transition regardless of what,
+    # if anything, this container's "root" maps to on the host.
     userns_mode: "auto"
     volumes:
       # Named volume for the home directory so Claude Code auth state,
