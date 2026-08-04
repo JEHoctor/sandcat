@@ -125,7 +125,11 @@ apply_secret_provider() {
 # Switches the mitmproxy service from web UI to console (mitmdump) mode.
 # Replaces the mitmweb command with mitmdump, strips mitmweb-only flags
 # (--web-host and --set web_password), and removes the web UI port.
-# mitmdump logs flows as text to stdout, viewable via docker compose logs.
+# mitmdump logs flows as text to stdout, viewable via `sandcat compose logs`.
+#
+# The port is published by the netns service, not by mitmproxy: mitmproxy joins
+# the netns container's network namespace and so has none of its own to publish
+# from. The command still belongs to mitmproxy — only the port moved.
 # Args:
 #   $1 - Path to the compose-proxy.yml file
 set_proxy_tui_mode() {
@@ -138,7 +142,7 @@ set_proxy_tui_mode() {
 			sub("\\s+--web-host\\s+\\S+", "") |
 			sub("\\s+--set\\s+web_password=\\S+", "")
 		) |
-		del(.services.mitmproxy.ports)
+		del(.services.netns.ports)
 	' "$compose_file"
 }
 
@@ -166,8 +170,10 @@ add_settings_volume() {
 	local settings_dir
 	settings_dir=$(dirname "$settings_file")
 
+	# ",z": see add_volume_entry's comment — a host bind mount, needs a
+	# shared SELinux relabel on an enforcing host.
 	settings_dir="$settings_dir" yq -i \
-		'.services.mitmproxy.volumes += [env(settings_dir) + ":/config/project:ro"]' "$compose_file"
+		'.services.mitmproxy.volumes += [env(settings_dir) + ":/config/project:ro,z"]' "$compose_file"
 
 	add_foot_comment "$compose_file" ".services.mitmproxy.volumes" \
 		'Project-level settings (.sandcat/ directory). If the directory does
@@ -213,9 +219,22 @@ add_volume_foot_comment() {
 }
 
 # Adds a volume entry to the agent service, either as active or commented.
+#
+# Host bind mounts (anything not a podman/docker-managed named volume — a
+# path starting with `.`, `..`, or `${HOME}`) need a trailing `,z` in the mode
+# field on an SELinux-enforcing host: files under a user's home directory
+# carry `user_home_t`, which the confined container_t domain cannot read at
+# all, and a plain `--device`-style passthrough doesn't apply here — only a
+# relabel does. `z` (shared) rather than `Z` (private) specifically, because
+# some of these paths (`~/.config/sandcat/settings.json`, `~/.claude/*`,
+# `~/.cursor/*`) are expected to be mounted into more than one project's
+# sandbox at once, and a private relabel would let the second sandbox's mount
+# silently revoke the first's access. Named volumes need no such suffix — the
+# engine labels them correctly on creation.
+#
 # Args:
 #   $1 - Path to the Docker Compose file
-#   $2 - Volume entry (e.g., "../.git:/workspace/.git:ro")
+#   $2 - Volume entry (e.g., "../.git:/workspace/.git:ro,z")
 #   $3 - true to add as active entry, false to add as comment
 #   $4 - Optional description comment
 add_volume_entry() {
@@ -253,11 +272,11 @@ add_claude_config_volumes() {
 	local active=${2:-true}
 
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro' "$active" 'Host Claude config (optional)'
+	add_volume_entry "$compose_file" '${HOME}/.claude/CLAUDE.md:/home/vscode/.claude/CLAUDE.md:ro,z' "$active" 'Host Claude config (optional)'
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.claude/agents:/home/vscode/.claude/agents:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.claude/agents:/home/vscode/.claude/agents:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.claude/commands:/home/vscode/.claude/commands:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.claude/commands:/home/vscode/.claude/commands:ro,z' "$active"
 }
 
 # Adds Codex config volume mounts to the agent service.
@@ -289,27 +308,27 @@ add_cursor_config_volumes() {
 	project_id=$(sct_cursor_workspace_project_id "$project_name")
 
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro' "$active" 'Host Cursor config (optional)'
+	add_volume_entry "$compose_file" '${HOME}/.cursor/AGENTS.md:/home/vscode/.cursor/AGENTS.md:ro,z' "$active" 'Host Cursor config (optional)'
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/rules:/home/vscode/.cursor/rules:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/rules:/home/vscode/.cursor/rules:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/skills:/home/vscode/.cursor/skills:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/skills:/home/vscode/.cursor/skills:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/commands:/home/vscode/.cursor/commands:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/hooks.json:/home/vscode/.cursor/hooks.json:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/hooks:/home/vscode/.cursor/hooks:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/hooks:/home/vscode/.cursor/hooks:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/agents:/home/vscode/.cursor/agents:ro,z' "$active"
 	# shellcheck disable=SC2016
-	add_volume_entry "$compose_file" '${HOME}/.cursor/mcp.json:/home/vscode/.cursor/mcp.json:ro' "$active"
+	add_volume_entry "$compose_file" '${HOME}/.cursor/mcp.json:/home/vscode/.cursor/mcp.json:ro,z' "$active"
 	# Workspace-scoped runtime state — only this sandcat project's Cursor
 	# projects/<id>/ tree is mounted (agent transcripts, terminals, etc.).
 	# chats/, plugins/, and subagents/ remain in agent-home to avoid leaking
 	# other workspaces' data from the host profile.
 	add_volume_entry "$compose_file" \
-		"\${HOME}/.cursor/projects/${project_id}:/home/vscode/.cursor/projects/${project_id}" \
+		"\${HOME}/.cursor/projects/${project_id}:/home/vscode/.cursor/projects/${project_id}:z" \
 		"$active"
 }
 
@@ -322,7 +341,7 @@ add_git_readonly_volume() {
 	local compose_file=$1
 	local active=${2:-true}
 
-	add_volume_entry "$compose_file" '../.git:/workspace/.git:ro' "$active" 'Read-only Git directory'
+	add_volume_entry "$compose_file" '../.git:/workspace/.git:ro,z' "$active" 'Read-only Git directory'
 }
 
 # Adds .idea directory mount as read-only to the agent service.
@@ -333,7 +352,7 @@ add_idea_readonly_volume() {
 	local compose_file=$1
 	local active=${2:-true}
 
-	add_volume_entry "$compose_file" '../.idea:/workspace/.idea:ro' "$active" 'Read-only IntelliJ IDEA project directory'
+	add_volume_entry "$compose_file" '../.idea:/workspace/.idea:ro,z' "$active" 'Read-only IntelliJ IDEA project directory'
 }
 
 # Adds shared-cache mount entries + top-level external volume declarations
@@ -420,9 +439,9 @@ set_workspace() {
 	project_name="$project_name" yq -i \
 		'.services.agent.working_dir = "/workspaces/" + env(project_name)' "$compose_file"
 
-	add_volume_entry "$compose_file" "..:${workspace}" "true" "Mount the project's code"
-	add_volume_entry "$compose_file" "../.devcontainer:${workspace}/.devcontainer:ro" "true" "Read-only devcontainer directory"
-	add_volume_entry "$compose_file" "../.sandcat:${workspace}/.sandcat:ro" "true" "Read-only settings directory"
+	add_volume_entry "$compose_file" "..:${workspace}:z" "true" "Mount the project's code"
+	add_volume_entry "$compose_file" "../.devcontainer:${workspace}/.devcontainer:ro,z" "true" "Read-only devcontainer directory"
+	add_volume_entry "$compose_file" "../.sandcat:${workspace}/.sandcat:ro,z" "true" "Read-only settings directory"
 }
 
 # Adds JetBrains-specific capabilities to the agent service.

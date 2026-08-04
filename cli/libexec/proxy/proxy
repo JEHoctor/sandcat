@@ -5,6 +5,8 @@ set -euo pipefail
 source "$SCT_LIBDIR/logging.bash"
 # shellcheck source=../../lib/require.bash
 source "$SCT_LIBDIR/require.bash"
+# shellcheck source=../../lib/engine.bash
+source "$SCT_LIBDIR/engine.bash"
 # shellcheck source=../../lib/path.bash
 source "$SCT_LIBDIR/path.bash"
 
@@ -12,22 +14,26 @@ source "$SCT_LIBDIR/path.bash"
 # In console mode (mitmdump): tails the proxy logs.
 # In web mode (mitmweb): prints the URL of the web UI.
 proxy() {
-	require docker
+	require_engine
 
 	local compose_file
 	compose_file="$(find_compose_file)"
 
 	# Detect mode: web mode has port 8081 mapped, console mode does not.
+	#
+	# The port belongs to the netns service, not to mitmproxy: mitmproxy joins
+	# the netns container's network namespace and so has none of its own to
+	# publish from. The logs still come from mitmproxy — only the port moved.
 	local has_ports
-	has_ports=$(docker compose -f "$compose_file" config --format json |
-		yq '.services.mitmproxy.ports // [] | length')
+	has_ports=$(sct_engine_compose -f "$compose_file" config --format json |
+		yq '.services.netns.ports // [] | length')
 
 	if [[ "$has_ports" == "0" ]]; then
 		echo "Following mitmproxy logs (Ctrl+C to stop)..." | info
-		docker compose -f "$compose_file" logs -f mitmproxy
+		sct_engine_compose -f "$compose_file" logs -f mitmproxy
 	else
 		local url
-		url=$(docker compose -f "$compose_file" port mitmproxy 8081 2>/dev/null) || true
+		url=$(sct_engine_compose -f "$compose_file" port netns 8081 2>/dev/null) || true
 		if [[ -z "$url" ]]; then
 			echo "Proxy is not running. Start it first with: sandcat run or sandcat compose up -d" | error
 			return 1

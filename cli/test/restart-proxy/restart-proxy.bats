@@ -16,11 +16,13 @@ teardown() {
 }
 
 @test "restart-proxy restarts when proxy is running" {
+	# No restart of the networking container: it owns the network namespace
+	# its siblings joined, so restarting it would strand them. mitmproxy
+	# reattaches to the persistent TUN device on its own.
 	stub docker \
 		"compose -f $COMPOSE_FILE ps mitmproxy --status running --quiet : echo 'proxy-id'" \
 		"compose -f $COMPOSE_FILE restart mitmproxy : :" \
-		"compose -f $COMPOSE_FILE up -d --wait --wait-timeout 60 mitmproxy : :" \
-		"compose -f $COMPOSE_FILE restart wg-client : :"
+		"compose -f $COMPOSE_FILE up -d --wait --wait-timeout 60 mitmproxy : :"
 
 	cd "$BATS_TEST_TMPDIR"
 	run restart-proxy

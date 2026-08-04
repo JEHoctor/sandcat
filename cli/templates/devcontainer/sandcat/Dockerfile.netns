@@ -1,0 +1,20 @@
+FROM debian:trixie-slim
+
+# Dependencies for the TUN device and the iptables kill switch:
+#   iproute2   - `ip` for the TUN device, addressing and routing
+#   iptables   - kill switch enforcing that the TUN device is the only way out
+#   util-linux - `setpriv` to drop UID and every capability after setup
+#
+# Deliberately absent compared to the WireGuard setup this replaces:
+# wireguard-tools (no tunnel to key), jq (no wireguard.conf to parse),
+# dnsmasq and openresolv (no split-horizon resolver to run — mitmproxy sees
+# DNS directly through the TUN device).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        iproute2 iptables util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/netns-init.sh /usr/local/bin/netns-init.sh
+RUN chmod +x /usr/local/bin/netns-init.sh
+
+ENTRYPOINT ["/usr/local/bin/netns-init.sh"]

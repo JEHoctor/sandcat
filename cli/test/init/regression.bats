@@ -33,7 +33,13 @@ assert_agent_service() {
 
 	yq -e '.services.agent.working_dir == "/workspaces/project-sandbox"' "$compose_file"
 
-	yq -e '.services.agent.network_mode == "service:wg-client"' "$compose_file"
+	yq -e '.services.agent.network_mode == "service:netns"' "$compose_file"
+
+	# Container-root in the agent must map to an unprivileged host UID. The
+	# kill switch exempts the proxy's UID from its egress DROP, so an agent
+	# sharing the host UID space could assume that UID and walk around the
+	# proxy entirely. The user namespace is what keeps the two disjoint.
+	yq -e '.services.agent.userns_mode == "auto"' "$compose_file"
 
 	# FIXME vscode startup fails with capabilities dropped
 	# yq -e '.services.agent.cap_drop[] | select(. == "ALL")' "$compose_file"
@@ -59,7 +65,7 @@ assert_common_volumes() {
 	# Bind: Project root
 	PROJECT_DIR="$PROJECT_DIR" yq -e '
 		.services.agent.volumes[] |
-		select(.type == "bind" and .source == env(PROJECT_DIR) and .target == "/workspaces/project-sandbox")
+		select(.type == "bind" and .source == env(PROJECT_DIR) and .target == "/workspaces/project-sandbox" and .bind.selinux == "z")
 	' "$compose_file"
 
 	# Bind: .sandcat (read-only)
@@ -69,7 +75,8 @@ assert_common_volumes() {
 			.type == \"bind\" and
 			.source == (env(PROJECT_DIR) + \"/.sandcat\") and
 			.target == \"/workspaces/project-sandbox/.sandcat\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -107,7 +114,8 @@ assert_claude_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.claude/CLAUDE.md\") and
 			.target == \"/home/vscode/.claude/CLAUDE.md\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -118,7 +126,8 @@ assert_claude_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.claude/agents\") and
 			.target == \"/home/vscode/.claude/agents\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -129,7 +138,8 @@ assert_claude_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.claude/commands\") and
 			.target == \"/home/vscode/.claude/commands\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 }
@@ -145,7 +155,8 @@ assert_customization_volumes_core() {
 			.type == \"bind\" and
 			.source == (env(PROJECT_DIR) + \"/.sandcat\") and
 			.target == \"/config/project\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -156,7 +167,8 @@ assert_customization_volumes_core() {
 			.type == \"bind\" and
 			.source == (env(PROJECT_DIR) + \"/.git\") and
 			.target == \"/workspace/.git\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 }
@@ -171,7 +183,8 @@ assert_customization_volumes_idea() {
 			.type == \"bind\" and
 			.source == (env(PROJECT_DIR) + \"/.idea\") and
 			.target == \"/workspace/.idea\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 }
@@ -192,7 +205,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/AGENTS.md\") and
 			.target == \"/home/vscode/.cursor/AGENTS.md\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -202,7 +216,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/rules\") and
 			.target == \"/home/vscode/.cursor/rules\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -212,7 +227,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/skills\") and
 			.target == \"/home/vscode/.cursor/skills\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -222,7 +238,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/commands\") and
 			.target == \"/home/vscode/.cursor/commands\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -232,7 +249,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/agents\") and
 			.target == \"/home/vscode/.cursor/agents\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -242,7 +260,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/hooks\") and
 			.target == \"/home/vscode/.cursor/hooks\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -252,7 +271,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/hooks.json\") and
 			.target == \"/home/vscode/.cursor/hooks.json\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -262,7 +282,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/mcp.json\") and
 			.target == \"/home/vscode/.cursor/mcp.json\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 
@@ -272,7 +293,8 @@ assert_cursor_volumes() {
 			.type == \"bind\" and
 			.source == (env(HOME) + \"/.cursor/projects/workspaces-project-sandbox\") and
 			.target == \"/home/vscode/.cursor/projects/workspaces-project-sandbox\" and
-			(.read_only // false) == false
+			(.read_only // false) == false and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 }
@@ -287,7 +309,8 @@ assert_devcontainer_volume() {
 			.type == \"bind\" and
 			.source == (env(PROJECT_DIR) + \"/.devcontainer\") and
 			.target == \"/workspaces/project-sandbox/.devcontainer\" and
-			.read_only == true
+			.read_only == true and
+			.bind.selinux == \"z\"
 		)
 	" "$compose_file"
 }

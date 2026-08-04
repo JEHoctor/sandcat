@@ -20,3 +20,8 @@ bats_load_library bats-mock-ext
 export SCT_ROOT
 export SCT_LIBDIR="$SCT_ROOT/lib"
 export SCT_LIBEXECDIR="$SCT_ROOT/libexec"
+
+# Pin the container engine so tests stay deterministic regardless of what is
+# installed on the runner: sct_engine() prefers podman when both are present,
+# and these suites stub `docker`.
+export SANDCAT_ENGINE=docker

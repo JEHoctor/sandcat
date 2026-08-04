@@ -2,7 +2,13 @@
 
 Command-line tool for managing sandcat configurations and Docker Compose setups.
 
-Requires `docker` (and `docker compose`) and [`yq`](https://github.com/mikefarah/yq).
+Requires `podman` or `docker` (with their `compose` subcommand) and [`yq`](https://github.com/mikefarah/yq).
+
+On podman, use the Docker Compose binary as the compose provider rather than
+`podman-compose`. The agent service needs `userns_mode` together with
+`network_mode: "service:netns"`; `podman-compose` places every service in a pod
+and podman rejects `--userns` and `--pod` together, so the agent fails to
+start.
 
 ## Modules and Commands
 
@@ -80,7 +86,7 @@ The published image (`ghcr.io/virtuslab/sandcat-mitmproxy-pass`) is built in CI,
 
 ```bash
 set -a; . images/mitmproxy-pass/pass-cli.env; set +a
-docker build \
+podman build \
   --build-arg PASS_CLI_VERSION \
   --build-arg PASS_CLI_SHA256_X86_64 \
   --build-arg PASS_CLI_SHA256_AARCH64 \
@@ -128,8 +134,9 @@ Displays the current version of sandcat.
 
 ### `sandcat compose`
 
-Runs docker compose commands with the correct compose file automatically detected. Pass any docker compose arguments
-(e.g., `sandcat compose up -d` or `sandcat compose logs`).
+Runs the container engine's compose commands with the correct compose file automatically detected. Pass any compose
+arguments (e.g., `sandcat compose up -d` or `sandcat compose logs`). The engine is resolved by `sct_engine`
+(podman preferred, docker as fallback, `SANDCAT_ENGINE` to pin).
 
 ### `sandcat cache`
 
@@ -179,7 +186,7 @@ Opens the mitmproxy interface for traffic inspection. Behavior depends on the pr
 
 ### `sandcat restart-proxy`
 
-Restarts the mitmproxy and wg-client services to pick up settings changes. Run this after editing any settings
+Restarts the mitmproxy and netns services to pick up settings changes. Run this after editing any settings
 file (project or user) to apply the new configuration.
 
 ### `sandcat run`
