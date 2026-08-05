@@ -45,35 +45,59 @@ It has two main tasks:
 * run `docker compose` commands with the correct compose file automatically
   detected, so you don't have to remember the file names or paths.
 
-The CLI can itself be run through a docker image that we publish to our
-repository, so that no local installation is required; or installed locally by
-cloning this git repository.
+#### Shell installer (recommended)
 
-#### Run as docker image (recommended)
+Install sandcat CLI to `~/.local/share/sandcat/` with a launcher symlink
+at `~/.local/bin/sandcat`. Requires `yq` (Mike Farah's Go variant) already
+installed on the host — see [yq prerequisite](#yq-prerequisite) below.
 
 ```bash
-# Pull the image to local docker
-docker pull ghcr.io/virtuslab/sandcat
-
-# Add to your .bashrc or .zshrc
-alias sandcat='docker run --rm -it -v "/var/run/docker.sock:/var/run/docker.sock" -v"$PWD:$PWD" -v"$HOME/.config/sandcat:$HOME/.config/sandcat" -w"$PWD" -e TERM -e HOME ghcr.io/virtuslab/sandcat'
+curl -fsSL https://raw.githubusercontent.com/VirtusLab/sandcat/master/install.sh | sh
 ```
 
-The CLI needs access to your current directory (to copy project configuration),
-the host Docker socket (to manage sandbox containers), your user config
-directory (`~/.config/sandcat/` to initialize the settings file), and a couple
-of environment variables (`TERM` for terminal handling, `HOME` so Docker Compose
-can resolve `~` in volume mounts).
+Ensure `~/.local/bin` is on your `PATH` (the installer prints a hint if it
+isn't), then jump to [Initialize the sandbox](#2-initialize-the-sandbox-for-your-project).
 
-Using the Docker image disables the editor integration (`vi` installed in the
-image will be used instead of your host editor). Host environment variables are
-not forwarded unless you add `-e` flags explicitly.
+**Upgrade:** re-run the same command. The installer atomically swaps the
+existing install; `~/.config/sandcat/` (user settings) is never touched.
+Combine with `SANDCAT_REF` to jump to a different branch/tag/commit:
 
-The image runs as root, to avoid permission issues with the host Docker socket.
-On Colima file ownership is mapped automatically, on Linux you should add
-`--user` parameter accordingly.
+```bash
+curl -fsSL https://raw.githubusercontent.com/VirtusLab/sandcat/master/install.sh | SANDCAT_REF=v1.0.0 sh
+curl -fsSL https://raw.githubusercontent.com/VirtusLab/sandcat/master/install.sh | SANDCAT_REF=abc123 sh
+```
 
-#### Local install
+Custom paths (env overrides), e.g. system-wide install:
+
+```bash
+SANDCAT_HOME=/opt/sandcat SANDCAT_BIN_DIR=/usr/local/bin \
+    curl -fsSL https://.../install.sh | sudo -E sh
+```
+
+Non-interactive mode (CI):
+
+```bash
+curl -fsSL https://.../install.sh | SANDCAT_NON_INTERACTIVE=true sh
+```
+
+Uninstall (preserves user config and Docker state):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/VirtusLab/sandcat/master/install.sh) --uninstall
+```
+
+Env overrides in one place:
+
+| Var | Default | Purpose |
+|---|---|---|
+| `SANDCAT_HOME` | `$HOME/.local/share/sandcat` | Install root |
+| `SANDCAT_BIN_DIR` | `$HOME/.local/bin` | Launcher symlink dir |
+| `SANDCAT_REF` | `master` | Branch / tag / commit to fetch |
+| `SANDCAT_NON_INTERACTIVE` | `false` | Skip all prompts (CI) |
+
+#### Alternative: git clone
+
+For contributors, or if you prefer to track a working tree directly:
 
 ```bash
 # Clone the repo
@@ -83,9 +107,13 @@ git clone https://github.com/VirtusLab/sandcat.git
 export PATH="$PWD/sandcat/cli/bin:$PATH"
 ```
 
+Update via `git pull` in the cloned directory.
+
+#### yq prerequisite
+
 `yq` is required to edit compose files. Sandcat uses [Mike Farah's Go `yq`](https://github.com/mikefarah/yq); the unrelated Python `yq` (kislyuk/yq) is **not** compatible.
 
-On Debian/Ubuntu, `apt install yq` installs the Python variant. Install Mike Farah's `yq` instead — for example `snap install yq`, or download a binary from the [release page](https://github.com/mikefarah/yq/releases). Homebrew, Alpine `apk`, and the project's own Docker image already ship the correct one.
+On Debian/Ubuntu, `apt install yq` installs the Python variant. Install Mike Farah's `yq` instead — for example `snap install yq`, or download a binary from the [release page](https://github.com/mikefarah/yq/releases). Homebrew and Alpine `apk` already ship the correct one.
 
 ### 2. Initialize the sandbox for your project
 
