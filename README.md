@@ -167,7 +167,7 @@ At image build time the two files are merged into a single devbox global
 config. `devbox.tools.json` wins over `devbox.stack.json` on:
 
 * **Same package name** — the `@` prefix. Put `nodejs@22.5.1` in tools
-  to replace the stack's `nodejs@lts`.
+  to replace the stack's `nodejs` (without a specifier, `nodejs` refers to lts).
 * **Cross-family collisions** — tools packages providing the same file
   as a stack package win too. Put `openjdk17@latest` in tools to make
   it the active Java over the stack's `temurin-bin-25@latest`; the
