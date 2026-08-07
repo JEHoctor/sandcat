@@ -220,8 +220,6 @@ teardown() {
 
 	customize_compose_stack_environment "$BATS_TEST_TMPDIR/compose-all.yml" python
 
-	yq -e '.services.agent.environment[] | select(. == "UV_NATIVE_TLS=1")' \
-		"$BATS_TEST_TMPDIR/compose-all.yml"
 	yq -e '.services.agent.environment[] | select(. == "UV_SYSTEM_CERTS=1")' \
 		"$BATS_TEST_TMPDIR/compose-all.yml"
 }
@@ -249,7 +247,7 @@ teardown() {
 	customize_compose_stack_environment "$BATS_TEST_TMPDIR/compose-all.yml" python
 	customize_agent_templates "$BATS_TEST_TMPDIR" "claude"
 
-	yq -e '.services.agent.environment[] | select(. == "UV_NATIVE_TLS=1")' \
+	yq -e '.services.agent.environment[] | select(. == "UV_SYSTEM_CERTS=1")' \
 		"$BATS_TEST_TMPDIR/compose-all.yml"
 	yq -e '.services.agent.environment[] | select(. == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")' \
 		"$BATS_TEST_TMPDIR/compose-all.yml"
@@ -263,7 +261,7 @@ teardown() {
 	customize_agent_templates "$BATS_TEST_TMPDIR" "claude"
 	customize_compose_stack_environment "$BATS_TEST_TMPDIR/compose-all.yml" python
 
-	yq -e '.services.agent.environment[] | select(. == "UV_NATIVE_TLS=1")' \
+	yq -e '.services.agent.environment[] | select(. == "UV_SYSTEM_CERTS=1")' \
 		"$BATS_TEST_TMPDIR/compose-all.yml"
 	yq -e '.services.agent.environment[] | select(. == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")' \
 		"$BATS_TEST_TMPDIR/compose-all.yml"
