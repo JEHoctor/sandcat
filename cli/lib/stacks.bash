@@ -44,6 +44,20 @@ stack_extension() {
 	esac
 }
 
+# Returns newline-separated "KEY=value" environment entries a stack needs
+# set on the agent service (empty if none).
+#
+# python: uv (the default Python package manager) bundles its own root CA
+# store and doesn't consult the system trust store by default, so it fails
+# TLS verification against mitmproxy's intercepting CA. UV_SYSTEM_CERTS is
+# the current variable name; UV_NATIVE_TLS is the deprecated alias. Both are
+# set for compatibility across uv versions.
+stack_env_entries() {
+	case $1 in
+		python) printf '%s\n' "UV_NATIVE_TLS=1" "UV_SYSTEM_CERTS=1" ;;
+	esac
+}
+
 # Returns space-separated dependency stack names (empty if none).
 stack_deps() {
 	case $1 in
