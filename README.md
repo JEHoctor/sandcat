@@ -1507,9 +1507,8 @@ enough for most tools — but some runtimes bring their own CA handling:
   Other native tools may need similar tool-specific configuration.
 - **Python** uses the system CA store — works out of the box. The exception is
   **uv**, which is itself a Rust binary and (like other `rustls`-based tools)
-  bundles its own root CAs. The `python` stack sets `UV_NATIVE_TLS` and
-  `UV_SYSTEM_CERTS` on the agent service automatically so `uv` reads the
-  system store instead.
+  bundles its own root CAs. The `python` stack sets `UV_SYSTEM_CERTS` on the
+  agent service automatically so `uv` reads the system store instead.
 
 ## Development
 
