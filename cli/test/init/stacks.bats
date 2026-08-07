@@ -87,8 +87,7 @@ teardown() {
 
 @test "stack_env_entries returns uv TLS config for python" {
 	run stack_env_entries python
-	assert_output "UV_NATIVE_TLS=1
-UV_SYSTEM_CERTS=1"
+	assert_output "UV_SYSTEM_CERTS=1"
 }
 
 @test "stack_env_entries returns empty for stacks without env contributions" {
