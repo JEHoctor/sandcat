@@ -54,7 +54,7 @@ stack_extension() {
 # set for compatibility across uv versions.
 stack_env_entries() {
 	case $1 in
-		python) printf '%s\n' "UV_NATIVE_TLS=1" "UV_SYSTEM_CERTS=1" ;;
+		python) echo "UV_SYSTEM_CERTS=1" ;;
 	esac
 }
 
