@@ -5,18 +5,31 @@ set -euo pipefail
 source "$SCT_LIBDIR/logging.bash"
 # shellcheck source=../../lib/require.bash
 source "$SCT_LIBDIR/require.bash"
+# shellcheck source=../../lib/engine.bash
+source "$SCT_LIBDIR/engine.bash"
 # shellcheck source=../../lib/path.bash
 source "$SCT_LIBDIR/path.bash"
 
-# Restarts the mitmproxy and wg-client services to pick up settings changes.
+# Restarts the mitmproxy service to pick up settings changes.
+#
+# Only mitmproxy needs restarting. It used to be paired with a restart of the
+# networking container, which read the upstream resolver out of dns.conf at
+# startup and would otherwise have kept serving the old one — but that
+# container no longer participates in DNS at all, and restarting it now would
+# be actively harmful: it owns the network namespace its siblings joined, and
+# tearing that down would strand them.
+#
+# mitmproxy reattaches to the TUN device across a restart without help. The
+# device is created persistent and owned by mitmproxy's UID, so it outlives any
+# single mitmproxy process and a fresh one simply reopens it.
 restart-proxy() {
-	require docker
+	require_engine
 
 	local compose_file
 	compose_file="$(find_compose_file)"
 
 	local proxy_status
-	proxy_status=$(docker compose -f "$compose_file" ps mitmproxy --status running --quiet 2>/dev/null) || true
+	proxy_status=$(sct_engine_compose -f "$compose_file" ps mitmproxy --status running --quiet 2>/dev/null) || true
 
 	if [[ -z "$proxy_status" ]]; then
 		echo "Proxy service is not running." | warning
@@ -24,14 +37,13 @@ restart-proxy() {
 	fi
 
 	echo "Restarting proxy service..." | info
-	docker compose -f "$compose_file" restart mitmproxy
-	# Wait for mitmproxy to become healthy before restarting wg-client. The
-	# addon rewrites dns.conf (the healthcheck sentinel) only after it has
-	# reloaded settings; restarting wg-client before that would re-read a
-	# stale dns.conf and keep the old upstream DNS. `restart` bypasses the
-	# compose depends_on health gate, so we wait explicitly here.
-	docker compose -f "$compose_file" up -d --wait --wait-timeout 60 mitmproxy
-	docker compose -f "$compose_file" restart wg-client
+	sct_engine_compose -f "$compose_file" restart mitmproxy
+	# Wait for the addon to finish reloading before returning. It rewrites
+	# dns.conf (the healthcheck sentinel) only after it has resolved every
+	# secret, so a healthy proxy is the signal that the new settings are
+	# actually live. `restart` bypasses the compose depends_on health gate,
+	# so we wait explicitly here.
+	sct_engine_compose -f "$compose_file" up -d --wait --wait-timeout 60 mitmproxy
 	echo "Proxy restarted. New settings are now active." | info
 }
 

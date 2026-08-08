@@ -2,6 +2,8 @@
 
 # shellcheck source=logging.bash
 source "$SCT_LIBDIR/logging.bash"
+# shellcheck source=engine.bash
+source "$SCT_LIBDIR/engine.bash"
 
 # Warns if the agent-home volume is meaningfully older than the agent
 # image — i.e. the image has been rebuilt since the volume was populated,
@@ -29,11 +31,11 @@ warn_stale_home_volume() {
 	local image_name="${project_name}-agent"
 
 	# No volume yet (first run) — nothing to warn about.
-	docker volume inspect "$volume_name" &>/dev/null || return 0
+	sct_engine_run volume inspect "$volume_name" &>/dev/null || return 0
 
 	local volume_time image_time
-	volume_time=$(docker volume inspect --format '{{.CreatedAt}}' "$volume_name" 2>/dev/null) || return 0
-	image_time=$(docker image inspect --format '{{.Created}}' "$image_name" 2>/dev/null) || return 0
+	volume_time=$(sct_engine_run volume inspect --format '{{.CreatedAt}}' "$volume_name" 2>/dev/null) || return 0
+	image_time=$(sct_engine_run image inspect --format '{{.Created}}' "$image_name" 2>/dev/null) || return 0
 
 	# Convert to epoch seconds. Requires GNU date; skip the check
 	# silently if unavailable (e.g. BSD date on macOS without coreutils)
@@ -47,11 +49,11 @@ warn_stale_home_volume() {
 	echo "The agent image was rebuilt since the agent-home volume was created." | warning
 	echo "Packages installed during the build may not be visible." | warning
 	echo "To fix, stop containers and remove the volume:" | warning
-	echo "  sandcat compose down && docker volume rm $volume_name" | warning
+	echo "  sandcat compose down && $(sct_engine) volume rm $volume_name" | warning
 }
 
 # Ensures every external volume referenced by the compose file exists on
-# the host — otherwise `docker compose up` fails with "external volume
+# the host — otherwise `sandcat compose up` fails with "external volume
 # not found". Docker's `volume create` is idempotent, so we can call it
 # unconditionally on every sandcat run.
 #
@@ -65,7 +67,7 @@ ensure_shared_cache_volumes() {
 	local compose_file=$1
 
 	command -v yq &>/dev/null || return 0
-	command -v docker &>/dev/null || return 0
+	sct_engine &>/dev/null || return 0
 
 	local names
 	names=$(yq -r '.volumes // {} | to_entries[] | select(.value.external == true) | .value.name // .key' \
@@ -76,6 +78,6 @@ ensure_shared_cache_volumes() {
 	local name
 	while IFS= read -r name; do
 		[[ -n "$name" ]] || continue
-		docker volume create --label sandcat-shared-cache=true "$name" >/dev/null 2>&1 || true
+		sct_engine_run volume create --label sandcat-shared-cache=true "$name" >/dev/null 2>&1 || true
 	done <<< "$names"
 }

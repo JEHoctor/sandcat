@@ -14,9 +14,23 @@ RUN set -eux; \
 	echo "$date-$sha" > cli/.version; \
 	cat cli/.version
 
-FROM docker:29-cli
+FROM alpine:3
 
-RUN apk add --update --no-cache bash yq ncurses
+# Previously `FROM docker:29-cli`, which bundled the Docker CLI and so pinned
+# the tool to one engine. sandcat now resolves its engine at runtime (see
+# cli/lib/engine.bash), preferring podman, so both clients ship here and
+# SANDCAT_ENGINE picks between them.
+#
+# podman-remote rather than the full podman: this container drives an engine
+# running on the host over a socket, exactly as the Docker CLI did. It does not
+# run containers itself.
+#
+# docker-cli-compose also serves as the compose provider for `podman compose`,
+# which delegates to whichever provider it finds.
+RUN apk add --update --no-cache \
+	bash yq ncurses \
+	podman-remote \
+	docker-cli docker-cli-compose
 
 WORKDIR /app
 ENTRYPOINT ["/opt/sandcat/bin/sandcat"]

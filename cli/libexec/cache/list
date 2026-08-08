@@ -3,13 +3,15 @@ set -euo pipefail
 
 # shellcheck source=../../lib/require.bash
 source "$SCT_LIBDIR/require.bash"
+# shellcheck source=../../lib/engine.bash
+source "$SCT_LIBDIR/engine.bash"
 # shellcheck source=../../lib/cache.bash
 source "$SCT_LIBDIR/cache.bash"
 
 # Lists every host-scoped shared-cache volume with its size, file count,
 # and any container currently mounting it.
 list() {
-	require docker
+	require_engine
 
 	local -a names
 	mapfile -t names < <(sct_cache_volume_names)

@@ -17,7 +17,7 @@ teardown() {
 
 @test "proxy tails logs in console mode" {
 	stub docker \
-		"compose -f $COMPOSE_FILE config --format json : echo '{\"services\":{\"mitmproxy\":{}}}'" \
+		"compose -f $COMPOSE_FILE config --format json : echo '{\"services\":{\"netns\":{}}}'" \
 		"compose -f $COMPOSE_FILE logs -f mitmproxy : :"
 
 	cd "$BATS_TEST_TMPDIR"
@@ -28,8 +28,8 @@ teardown() {
 
 @test "proxy shows URL in web mode" {
 	stub docker \
-		"compose -f $COMPOSE_FILE config --format json : echo '{\"services\":{\"mitmproxy\":{\"ports\":[\"8081\"]}}}'" \
-		"compose -f $COMPOSE_FILE port mitmproxy 8081 : echo 0.0.0.0:12345"
+		"compose -f $COMPOSE_FILE config --format json : echo '{\"services\":{\"netns\":{\"ports\":[\"8081\"]}}}'" \
+		"compose -f $COMPOSE_FILE port netns 8081 : echo 0.0.0.0:12345"
 
 	cd "$BATS_TEST_TMPDIR"
 	run proxy
@@ -39,8 +39,8 @@ teardown() {
 
 @test "proxy fails when not running in web mode" {
 	stub docker \
-		"compose -f $COMPOSE_FILE config --format json : echo '{\"services\":{\"mitmproxy\":{\"ports\":[\"8081\"]}}}'" \
-		"compose -f $COMPOSE_FILE port mitmproxy 8081 : exit 1"
+		"compose -f $COMPOSE_FILE config --format json : echo '{\"services\":{\"netns\":{\"ports\":[\"8081\"]}}}'" \
+		"compose -f $COMPOSE_FILE port netns 8081 : exit 1"
 
 	cd "$BATS_TEST_TMPDIR"
 	run proxy

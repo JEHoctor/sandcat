@@ -6,8 +6,8 @@ and transparent secret substitution. All of this is done while retaining the
 convenience of working in an IDE like VS Code.
 
 All container traffic is routed through a transparent
-[mitmproxy](https://mitmproxy.org/) via WireGuard, capturing HTTP/S, DNS, and
-all other TCP/UDP traffic without per-tool proxy configuration. A
+[mitmproxy](https://mitmproxy.org/) over a TUN device, capturing HTTP/S, DNS,
+and all other TCP/UDP traffic without per-tool proxy configuration. A
 straightforward allow/deny list-based engine controls which network requests go
 through, and a secret substitution system injects credentials at the proxy level
 so the container never sees real values.
@@ -17,7 +17,7 @@ This repository contains:
 * a bash CLI to initialize the sandbox for a project, copying and customizing
   the necessary files (see `cli/`)
 * reusable proxy definitions under `cli/templates/devcontainer/sandcat/`:
-  `Dockerfile.wg-client`, `compose-proxy.yml`, and `scripts/` that perform the
+  `Dockerfile.netns`, `compose-proxy.yml`, and `scripts/` that perform the
   network filtering & secret substitution
 * template application and dev container configuration under
   `cli/templates/devcontainer/`: `Dockerfile.app`, `compose-all.yml`,
@@ -94,6 +94,48 @@ Env overrides in one place:
 | `SANDCAT_BIN_DIR` | `$HOME/.local/bin` | Launcher symlink dir |
 | `SANDCAT_REF` | `master` | Branch / tag / commit to fetch |
 | `SANDCAT_NON_INTERACTIVE` | `false` | Skip all prompts (CI) |
+
+#### Alternative: container image
+
+```bash
+# Podman
+podman pull ghcr.io/virtuslab/sandcat
+
+# Add to your .bashrc or .zshrc
+alias sandcat='podman run --rm -it -v "$XDG_RUNTIME_DIR/podman/podman.sock:/var/run/podman/podman.sock" -v"$PWD:$PWD" -v"$HOME/.config/sandcat:$HOME/.config/sandcat" -w"$PWD" -e TERM -e HOME -e CONTAINER_HOST=unix:///var/run/podman/podman.sock ghcr.io/virtuslab/sandcat'
+```
+
+The podman socket is not enabled by default; start it once with
+`systemctl --user enable --now podman.socket`.
+
+<details>
+<summary>Docker equivalent</summary>
+
+```bash
+docker pull ghcr.io/virtuslab/sandcat
+
+alias sandcat='docker run --rm -it -v "/var/run/docker.sock:/var/run/docker.sock" -v"$PWD:$PWD" -v"$HOME/.config/sandcat:$HOME/.config/sandcat" -w"$PWD" -e TERM -e HOME -e SANDCAT_ENGINE=docker ghcr.io/virtuslab/sandcat'
+```
+
+The image ships both clients and prefers podman, so `SANDCAT_ENGINE=docker`
+pins it to Docker.
+</details>
+
+The CLI needs access to your current directory (to copy project configuration),
+the host engine socket (to manage sandbox containers), your user config
+directory (`~/.config/sandcat/` to initialize the settings file), and a couple
+of environment variables (`TERM` for terminal handling, `HOME` so compose can
+resolve `~` in volume mounts).
+
+Using the container image disables the editor integration (`vi` installed in the
+image will be used instead of your host editor). Host environment variables are
+not forwarded unless you add `-e` flags explicitly.
+
+The image runs as root to avoid permission issues with the host engine socket.
+Under rootless podman that container-root is already mapped to your own
+unprivileged host UID, so it grants nothing on the host. Under Docker it is
+real root: on Colima file ownership is mapped automatically, on Linux you
+should add a `--user` parameter accordingly.
 
 #### Alternative: git clone
 
@@ -562,8 +604,9 @@ multiple sandboxes are running in parallel.
 
 ### Customizing the generated files
 
-**`compose-all.yml`** — `network_mode: "service:wg-client"` routes all traffic
-through the WireGuard tunnel. The `mitmproxy-config` volume gives your container
+**`compose-all.yml`** — `network_mode: "service:netns"` puts the container in
+the locked-down network namespace, where the only route out is the TUN device
+mitmproxy terminates. The `mitmproxy-config` volume gives your container
 access to the CA cert, env vars, and secret placeholders. The agent-specific
 config bind-mounts (for example `~/.claude/*` or `~/.cursor/*`) forward host
 customizations — remove any mount whose
@@ -692,8 +735,8 @@ sandcat restart-proxy
 ```
 
 Note that VS Code's **Rebuild Container** only rebuilds the `agent` service — it
-does not restart `mitmproxy` or `wg-client`. Use `sandcat restart-proxy` to
-apply settings changes.
+does not restart `mitmproxy`. Use `sandcat restart-proxy` to apply settings
+changes.
 
 ## Network access rules
 
@@ -754,15 +797,16 @@ With the liberal template rules:
 
 ## DNS resolution
 
-Queries that aren't refused by the network rules are resolved by a small
-`dnsmasq` running inside `wg-client`, which splits traffic two ways: sibling
-containers go to Docker's embedded resolver locally, everything else goes
-through the WireGuard tunnel to mitmproxy and out via the configured upstream.
+Queries that aren't refused by the network rules reach mitmproxy the same way
+every other packet does — over the TUN device — and are resolved from there via
+the configured upstream. There is no resolver running alongside the agent: DNS
+is not a special case in this design, just UDP that mitmproxy sees because it
+holds the only route out.
 
 ### Custom upstream DNS — `dns_servers`
 
 Top-level optional array of IPv4/IPv6 addresses. Overrides the upstream DNS
-servers used by the WireGuard tunnel. Point this at a corporate/intranet
+servers mitmproxy forwards to. Point this at a corporate/intranet
 resolver to make internal hostnames (e.g. `*.corp.example.com`) work inside
 the sandbox. Empty list, omitted, or explicit `null` falls back to `1.1.1.1`
 and `8.8.8.8`. Hostnames are not accepted (resolv.conf `nameserver` directives
@@ -780,25 +824,28 @@ what a lower layer set. Run `sandcat restart-proxy` after editing.
 
 ### Container-to-container DNS
 
-The agent can resolve sibling containers on the same Docker compose network by
-name (e.g. a `db:` service in `compose.yml` is reachable as `db`). Queries
-under the compose project's network (the `search` domain Docker assigns to
-the container) go to Docker's embedded resolver at `127.0.0.11`. No
-configuration is required.
+The agent can resolve sibling containers on the same compose network by name
+(e.g. a `db:` service in `compose.yml` is reachable as `db`). No configuration
+is required.
 
-The agent shares wg-client's network namespace via `network_mode` but Docker
-still gives each container its own `/etc/resolv.conf` in its own mount
-namespace. wg-client publishes its resolv.conf onto a shared `wg-runtime`
-volume mounted read-only at `/run/sandcat` in the agent, and `app-init.sh`
-copies it into `/etc/resolv.conf` on startup so the agent's lookups also go
-through the local dnsmasq.
+The lookup does not happen in the agent. The agent asks mitmproxy, like it does
+for every other name, and mitmproxy resolves it using *its own* `/etc/resolv.conf`
+— which still points at the engine's embedded resolver. So sibling names work,
+and they work while passing the same allow/deny check as any other query.
 
-To prevent the search-domain carve-out from becoming a DNS exfiltration
-channel — where an attacker-crafted name like `<payload>.<project>_default`
-would otherwise be forwarded by Docker's embedded resolver to the host's
-upstream DNS, bypassing mitmproxy — wg-client is launched with a `dns:` sink
-(RFC 5737 `192.0.2.1`). Sibling names still resolve locally; anything else
-under the search domain fails fast without leaving the host.
+The engine's embedded resolver is deliberately unreachable from the agent
+itself. It sits inside the network namespace (Docker's on loopback at
+`127.0.0.11`, Podman's on the gateway), and reaching it would not traverse the
+TUN device — making it a DNS exfiltration channel that mitmproxy never sees.
+The kill switch therefore blocks port 53 for every UID except the proxy's, on
+loopback and on the physical interface alike. This replaces the previous
+design's `search`-domain carve-out and its RFC 5737 sink: rather than
+neutralizing what leaked out of that path, the path is closed.
+
+The agent still needs a nameserver address that routes over the tunnel, so the
+netns container publishes a `resolv.conf` onto a shared `netns-runtime` volume
+mounted read-only at `/run/sandcat`, and `app-init.sh` copies it into
+`/etc/resolv.conf` on startup.
 
 ### Resolving internal hostnames — `extra_hosts`
 
@@ -1116,30 +1163,47 @@ Cursor CLI support is available via `sandcat init --agent cursor`.
 
 ```mermaid
 flowchart LR
-    agent["<b>agent</b><br/><i>no NET_ADMIN</i><br/>your code runs here"]
-    wg["<b>wg-client</b><br/><i>NET_ADMIN</i><br/>WireGuard + iptables"]
-    mitm["<b>mitmproxy</b><br/><i>mitmweb</i><br/>network rules &amp;<br/>secret substitution"]
+    subgraph ns["shared network namespace"]
+        agent["<b>agent</b><br/><i>no caps, userns-mapped</i><br/>your code runs here"]
+        tun{{"<b>tun0</b><br/>only route out"}}
+        mitm["<b>mitmproxy</b><br/><i>no caps</i><br/>network rules &amp;<br/>secret substitution"]
+    end
+    netns["<b>netns</b><br/><i>NET_ADMIN, then drops it</i><br/>creates tun0 + kill switch"]
     inet(("internet"))
 
-    agent -- "network_mode:<br/>shares net namespace" --- wg
-    wg -- "WireGuard<br/>tunnel" --> mitm
+    netns -- "sets up, then<br/>holds the namespace" --- ns
+    agent -- "default route" --> tun
+    tun -- "terminated by" --- mitm
     mitm -- "allowed<br/>requests" --> inet
 
     style agent fill:#e8f4fd,stroke:#4a90d9
-    style wg fill:#fdf2e8,stroke:#d9904a
+    style netns fill:#fdf2e8,stroke:#d9904a
     style mitm fill:#e8fde8,stroke:#4ad94a
 ```
 
-- **mitmproxy** runs `mitmweb --mode wireguard`, creating a WireGuard server and
-  storing key pairs in `wireguard.conf`.
-- **wg-client** is a dedicated networking container that derives a WireGuard
-  client config from those keys, sets up the tunnel with `wg` and `ip` commands,
-  and adds iptables kill-switch rules. Only this container has `NET_ADMIN`. No
-  user code runs here.
-- **App containers** share `wg-client`'s network namespace via `network_mode`.
-  They inherit the tunnel and firewall rules but cannot modify them (no
-  `NET_ADMIN`). They install the mitmproxy CA cert into the system trust store
-  at startup so TLS interception works.
+- **netns** creates the TUN device, points the default route at it, installs the
+  iptables kill switch, then drops its UID and every capability and sleeps. It
+  is the only container that ever holds `NET_ADMIN`, it holds it only during
+  setup, and no user code runs there. It stays alive solely to keep the network
+  namespace pinned for the containers that joined it.
+- **mitmproxy** runs `mitmweb --mode tun:tun0`, joining that namespace and
+  terminating the TUN device from inside it. It runs with `cap_drop: [ALL]` —
+  the component that parses untrusted traffic holds **zero** capabilities. This
+  works because the TUN device is created *persistent* and owned by mitmproxy's
+  UID, and a persistent TUN can be reopened by its owner with no privilege.
+- **App containers** join the same namespace via `network_mode`. They inherit
+  the route and firewall but cannot modify them (no `NET_ADMIN`). They install
+  the mitmproxy CA cert into the system trust store at startup so TLS
+  interception works.
+- On podman, sandcat needs the Docker Compose binary as the compose provider.
+  `podman-compose` places every service in a pod, and podman rejects
+  `--userns` together with `--pod` — which breaks the agent's UID mapping
+  described next.
+- The agent runs with `userns_mode: auto`, so container-root maps to an
+  unprivileged host UID. This is not just about host safety: the kill switch
+  exempts the proxy's UID from its egress DROP, so an agent sharing the host's
+  UID space could assume that UID and walk around the proxy. The user namespace
+  is what keeps the two UID spaces disjoint.
 - The mitmproxy web UI is exposed on a dynamic host port (see below) to avoid
   conflicts when multiple projects include sandcat. Password: `mitmproxy`.
 
@@ -1151,7 +1215,7 @@ from the host:
 ```mermaid
 flowchart TB
     subgraph volumes["Shared volumes"]
-        mc["<b>mitmproxy-config</b><br/><i>wireguard.conf</i><br/><i>mitmproxy-ca-cert.pem</i><br/><i>sandcat.env</i>"]
+        mc["<b>mitmproxy-config</b><br/><i>mitmproxy-ca-cert.pem</i><br/><i>sandcat.env</i>"]
         ah["<b>agent-home</b><br/><i>/home/vscode</i><br/>persists Claude Code state,<br/>shell history across rebuilds"]
     end
 
@@ -1162,7 +1226,7 @@ flowchart TB
     end
 
     mitm["mitmproxy"] -- "read-write" --> mc
-    wg["wg-client"] -- "read-only" --> mc
+    netns["netns"] -- "chowns at setup" --> mc
     agent["agent"] -- "read-only" --> mc
     agent -- "read-write" --> ah
     settings -. "bind-mount" .-> mitm
@@ -1177,8 +1241,10 @@ flowchart TB
 ```
 
 - **`mitmproxy-config`** is the key shared volume. Mitmproxy writes to it
-  (WireGuard keys, CA cert, `sandcat.env` with env vars and secret
-  placeholders); all other containers mount it read-only.
+  (CA cert, `sandcat.env` with env vars and secret placeholders); app
+  containers mount it read-only. The netns container hands it to mitmproxy's
+  UID during setup, because the engine creates named volumes root-owned and a
+  zero-capability mitmproxy cannot chown it itself.
 - **`agent-home`** persists the vscode user's home directory across container
   rebuilds (Claude Code auth, shell history, git config).
 - **Settings files** are bind-mounted from the host into mitmproxy only — app
@@ -1197,27 +1263,27 @@ The containers start in dependency order. Each step writes data to the shared
 
 ```mermaid
 sequenceDiagram
+    participant N as netns
     participant M as mitmproxy
-    participant W as wg-client
     participant A as agent
 
-    Note over M: starts first (no dependencies)
-    M->>M: Start WireGuard server
-    M->>M: Generate wireguard.conf (key pairs)
+    Note over N: starts first — owns the namespace
+    N->>N: Create persistent tun0, owned by mitmproxy's UID
+    N->>N: Point default route at tun0
+    N->>N: Install iptables kill switch (v4 + v6)
+    N->>N: Publish resolv.conf for siblings
+    N->>N: Drop UID + all capabilities, hold namespace
+    Note over N: healthcheck passes<br/>(/tmp/netns-ready exists)
+
+    Note over M: starts after netns is healthy
+    M->>M: Join the namespace, attach to tun0 (no capabilities)
     M->>M: Read + merge settings (user, project, local)
     M->>M: Write sandcat.env (env vars + secret placeholders)
     M->>M: Write mitmproxy-ca-cert.pem
-    Note over M: healthcheck passes<br/>(wireguard.conf exists)
+    Note over M: healthcheck passes<br/>(CA cert + dns.conf exist)
 
-    Note over W: starts after mitmproxy is healthy
-    W->>W: Read wireguard.conf from shared volume
-    W->>W: Derive WireGuard client keys
-    W->>W: Create wg0 interface + routing
-    W->>W: Set up iptables kill switch
-    W->>W: Configure DNS via tunnel
-    Note over W: healthcheck passes<br/>(/tmp/wg-ready exists)
-
-    Note over A: starts after wg-client is healthy
+    Note over A: starts after mitmproxy is healthy
+    A->>A: Adopt published resolv.conf
     A->>A: Read CA cert from shared volume
     A->>A: Install CA into system trust store
     A->>A: Set NODE_EXTRA_CA_CERTS
@@ -1262,7 +1328,7 @@ box:
 - **Blocks local terminal creation** (`terminal.integrated.allowLocalTerminal:
   false`) so container extensions cannot call
   `workbench.action.terminal.newLocal` to open a shell on the host, which would
-  bypass the WireGuard tunnel entirely. For maximum protection, also set this in
+  bypass the sandbox's network boundary entirely. For maximum protection, also set this in
   your **host** user settings (workspace settings could theoretically override
   it).
 - **Read-only `.devcontainer` overlay** — `compose-all.yml` mounts the
@@ -1308,7 +1374,7 @@ directory.
 
 ```sh
 sandcat proxy              # prints the mitmweb URL and password
-sandcat compose port mitmproxy 8081  # or look up the port manually
+sandcat compose port netns 8081      # or look up the port manually
 ```
 
 Log in with password `mitmproxy`.
@@ -1325,18 +1391,22 @@ browser adds overhead.
 To verify the kill switch blocks direct traffic:
 
 ```sh
-# Should fail — iptables blocks direct eth0 access
+# Should fail — the kill switch drops non-proxy traffic on eth0
 curl --max-time 3 --interface eth0 http://1.1.1.1
 
 # Should fail — no NET_ADMIN to modify firewall
 iptables -F OUTPUT
+
+# Should fail — no NET_ADMIN to tear down the tunnel either
+ip link del tun0
 ```
 
 To verify Docker-internal traffic works (e.g. a database or app service added to
 the compose file):
 
 ```sh
-# Should succeed — Docker network traffic is allowed
+# Should succeed — resolved by mitmproxy against the engine's resolver,
+# then reached through the proxy like any other allowed request
 curl --max-time 3 http://my-service:8080
 ```
 
@@ -1348,12 +1418,21 @@ docker_gateway=$(ip -4 route show default dev eth0 | awk '{print $3}')
 curl --max-time 3 "http://$docker_gateway"
 ```
 
-To verify direct mitmproxy access is blocked:
+To verify the mitmweb UI is not reachable from the agent:
 
 ```sh
-# Should fail — mitmproxy container is only reachable via WireGuard
-mitmproxy_ip=$(getent hosts mitmproxy | awk '{print $1}')
-curl --max-time 3 "http://$mitmproxy_ip:8081"
+# Should fail — mitmproxy shares this network namespace, so the UI is on
+# loopback, but the kill switch rejects port 8081 for every UID but the proxy's
+curl --max-time 3 http://127.0.0.1:8081
+```
+
+To verify DNS cannot bypass the proxy:
+
+```sh
+# Should fail — the engine's embedded resolver is reachable inside the
+# namespace but not through the TUN device, so port 53 is blocked for
+# everyone except the proxy
+curl --max-time 3 http://127.0.0.11
 ```
 
 To verify secret substitution for the GitHub token:
@@ -1436,6 +1515,37 @@ started yet).
 mitmproxy CA may not be trusted. See [TLS and CA
 certificates](#tls-and-ca-certificates) for runtime-specific configuration.
 
+**`netns` fails to start with a TUN device permission error, on Podman +
+SELinux (Fedora, RHEL, and derivatives).** `sandcat compose logs netns` shows
+`Cannot open /dev/net/tun: Permission denied`. `NET_ADMIN` alone isn't enough
+on an SELinux-enforcing host — device passthrough via `devices:` also needs
+the `container_use_devices` boolean, which defaults to off:
+
+```sh
+getsebool container_use_devices   # confirm this is what's blocking it
+sudo setsebool -P container_use_devices on
+```
+
+This is a host-level setting, not something addressable from a compose file or
+the sandbox's own containers — it has to be applied on the machine running
+Podman, once. It only affects devices a container's `devices:` already lists
+(a container's `/dev` is otherwise empty of host devices regardless of this
+boolean), so it's narrower than it might sound: enabling it doesn't expose
+devices sandcat doesn't already ask for.
+
+If you can't get the boolean changed (e.g. no root on a shared or managed
+host), the fallback is disabling SELinux confinement for just the affected
+services, which is broader — it removes labeled confinement for those
+containers generally, not only for device access:
+
+```yaml
+services:
+  netns:
+    security_opt: ["label=disable"]
+  mitmproxy:
+    security_opt: ["label=disable"]
+```
+
 ## Unit tests
 
 **Python tests** (mitmproxy addon):
@@ -1464,9 +1574,11 @@ that runs alongside the container, however without secret substitution.
 Moreover, the proxy is not transparent, instead relying on the more traditional
 method of setting the `PROXY` environment variable.
 
-Finally, Sandcat builds on the Docker+mitmproxy in WireGuard mode integration
-implemented in
-[mitm_wg](https://github.com/Srikanth0824/side-projects/tree/main/mitm_wg).
+Sandcat's original transparent-capture design built on the Docker+mitmproxy in
+WireGuard mode integration implemented in
+[mitm_wg](https://github.com/Srikanth0824/side-projects/tree/main/mitm_wg); it
+now uses mitmproxy's TUN mode directly, which needs no tunnel transport because
+the proxy shares the namespace whose traffic it inspects.
 
 ## Notes
 
